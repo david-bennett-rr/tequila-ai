@@ -1,0 +1,269 @@
+<!-- index.html
+Pure-browser Realtime (WebRTC) client.
+Stores your API key locally (localStorage). No server needed.
+-->
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Realtime (Browser-only)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+      body { margin: 24px; display: grid; gap: 14px; max-width: 820px; }
+      .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+      input[type=text], input[type=password], select {
+        padding: 10px 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 8px; flex: 1;
+      }
+      button { padding: 10px 14px; font-size: 16px; border-radius: 8px; border: 1px solid #ccc; background: #f6f6f6; cursor: pointer; }
+      button:disabled { opacity: .5; cursor: not-allowed; }
+      #log { white-space: pre-wrap; background: #0c0f12; color: #c9f0ff; padding: 12px; border-radius: 10px; height: 250px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .tag { font-size: 12px; padding: 2px 6px; border-radius: 999px; background: #eef; color: #223; }
+      .sep { height: 1px; background: #e6e6e6; margin: 8px 0; }
+      .pill { display: inline-flex; gap: 6px; align-items: center; }
+      .small { font-size: 12px; color: #666; }
+    </style>
+  </head>
+  <body>
+    <h1>Realtime Voice — Browser Only</h1>
+
+    <div class="row">
+      <input id="apiKey" type="password" placeholder="OPENAI_API_KEY (stored locally)" />
+      <input id="model" type="text" value="gpt-realtime" />
+      <select id="voice">
+        <option value="alloy">alloy</option>
+        <option value="verse">verse</option>
+        <option value="coral">coral</option>
+        <option value="sage">sage</option>
+      </select>
+      <button id="saveKey">Save</button>
+    </div>
+
+    <div class="row">
+      <button id="connect">Connect</button>
+      <button id="mute" disabled>Mute Mic</button>
+      <button id="hangup" disabled>Hang Up</button>
+      <span class="pill"><span class="tag" id="status">idle</span></span>
+    </div>
+
+    <div class="row">
+      <input id="text" type="text" placeholder="Type and Send, or just speak…" />
+      <button id="send" disabled>Send</button>
+    </div>
+
+    <div class="sep"></div>
+    <div id="log"></div>
+    <div class="small">Tip: your API key and last settings are saved in <code>localStorage</code> only on this machine.</div>
+
+    <script type="module">
+      const $ = (id) => document.getElementById(id);
+      const elKey   = $("apiKey");
+      const elModel = $("model");
+      const elVoice = $("voice");
+      const btnSave = $("saveKey");
+      const btnConn = $("connect");
+      const btnMute = $("mute");
+      const btnHang = $("hangup");
+      const btnSend = $("send");
+      const input   = $("text");
+      const logEl   = $("log");
+      const statusEl= $("status");
+
+      // Persist simple settings locally
+      const store = {
+        get k() { return localStorage.getItem("OPENAI_API_KEY") || ""; },
+        set k(v) { localStorage.setItem("OPENAI_API_KEY", v); },
+        get m() { return localStorage.getItem("REALTIME_MODEL") || "gpt-realtime"; },
+        set m(v) { localStorage.setItem("REALTIME_MODEL", v); },
+        get v() { return localStorage.getItem("REALTIME_VOICE") || "alloy"; },
+        set v(voice) { localStorage.setItem("REALTIME_VOICE", voice); }
+      };
+      elKey.value   = store.k;
+      elModel.value = store.m;
+      elVoice.value = store.v;
+
+      btnSave.onclick = () => {
+        store.k = elKey.value.trim();
+        store.m = elModel.value.trim() || "gpt-realtime";
+        store.v = elVoice.value;
+        toast("Saved.");
+      };
+
+      function log(s) { logEl.textContent += s + "\\n"; logEl.scrollTop = logEl.scrollHeight; }
+      function toast(s) { statusEl.textContent = s; }
+      function setControls(state) {
+        const connected = state === "connected";
+        btnConn.disabled = connected;
+        btnMute.disabled = !connected;
+        btnHang.disabled = !connected;
+        btnSend.disabled = !connected;
+        input.disabled   = !connected;
+      }
+
+      let pc = null;
+      let dataChannel = null;
+      let localStream = null;
+      let remoteAudio = null;
+      let micMuted = false;
+
+      async function connect() {
+        const API_KEY = (elKey.value || "").trim();
+        const MODEL   = (elModel.value || "gpt-realtime").trim();
+        const VOICE   = elVoice.value;
+        if (!API_KEY) { toast("Missing API key"); return; }
+
+        setControls(false);
+        toast("connecting…");
+
+        // Mic capture
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch (e) {
+          log("[err] mic permission failed: " + e);
+          toast("mic blocked");
+          return;
+        }
+
+        // Peer connection
+        pc = new RTCPeerConnection({ iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] });
+
+        // Send mic
+        for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
+
+        // Receive audio
+        remoteAudio = new Audio();
+        remoteAudio.autoplay = true;
+        pc.ontrack = (e) => {
+          const [stream] = e.streams;
+          remoteAudio.srcObject = stream;
+        };
+
+        // Data channel for events (JSON realtime protocol)
+        dataChannel = pc.createDataChannel("oai-events");
+        dataChannel.onopen = () => log("[dc] open");
+        dataChannel.onclose = () => log("[dc] close");
+        dataChannel.onerror = (e) => log("[dc] error " + (e?.message || e));
+        dataChannel.onmessage = (e) => {
+          try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === "response.output_text.delta") {
+              // stream text deltas if desired:
+              // log(msg.delta);
+            }
+            if (msg.type === "response.output_text.done" && msg.text) {
+              log("[assistant] " + msg.text);
+            }
+          } catch {
+            log("[dc] " + e.data);
+          }
+        };
+
+        // Create offer SDP
+        const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: false });
+        await pc.setLocalDescription(offer);
+
+        // Create session (ephemeral) directly from the browser
+        // This POST is CORS-enabled. You are placing your key in the client by choice.
+        const createSession = await fetch("https://api.openai.com/v1/realtime/sessions", {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer " + API_KEY,
+            "Content-Type": "application/json",
+            "OpenAI-Beta": "realtime=v1"
+          },
+          body: JSON.stringify({
+            model: MODEL,
+            voice: VOICE,
+            output_audio_format: "pcm16",
+            instructions: "You are a concise, friendly voice assistant. Keep replies short."
+          })
+        });
+
+        if (!createSession.ok) {
+          log("[err] session: " + (await createSession.text()));
+          toast("session failed");
+          return;
+        }
+        const { client_secret } = await createSession.json();
+        const token = client_secret?.value || client_secret; // support both shapes
+
+        // Exchange SDP with the model using the ephemeral token
+        const sdpRes = await fetch("https://api.openai.com/v1/realtime?model=" + encodeURIComponent(MODEL), {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer " + token,
+            "Content-Type": "application/sdp",
+            "OpenAI-Beta": "realtime=v1"
+          },
+          body: offer.sdp
+        });
+
+        if (!sdpRes.ok) {
+          log("[err] sdp: " + (await sdpRes.text()));
+          toast("SDP failed");
+          return;
+        }
+
+        const answerSdp = await sdpRes.text();
+        await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+
+        setControls("connected");
+        toast("connected");
+        log("[sys] connected via WebRTC");
+      }
+
+      function sendText(text) {
+        if (!dataChannel || dataChannel.readyState !== "open") return;
+        const createItem = {
+          type: "conversation.item.create",
+          item: { type: "message", role: "user", content: [{ type: "input_text", text }] }
+        };
+        const respond = {
+          type: "response.create",
+          response: { modalities: ["audio", "text"] }
+        };
+        dataChannel.send(JSON.stringify(createItem));
+        dataChannel.send(JSON.stringify(respond));
+        log("[you] " + text);
+      }
+
+      function toggleMute() {
+        if (!localStream) return;
+        micMuted = !micMuted;
+        localStream.getAudioTracks().forEach((t) => (t.enabled = !micMuted));
+        btnMute.textContent = micMuted ? "Unmute Mic" : "Mute Mic";
+      }
+
+      function hangup() {
+        try { dataChannel?.close(); } catch {}
+        try { pc?.getSenders().forEach((s) => s.track && s.track.stop()); } catch {}
+        try { pc?.close(); } catch {}
+        pc = null; dataChannel = null; localStream = null; remoteAudio = null;
+        setControls("idle");
+        toast("idle");
+        log("[sys] disconnected");
+      }
+
+      // UI wiring
+      btnConn.onclick = connect;
+      btnMute.onclick = toggleMute;
+      btnHang.onclick = hangup;
+      btnSend.onclick = () => {
+        const t = input.value.trim();
+        if (!t) return;
+        sendText(t);
+        input.value = "";
+      };
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") btnSend.click(); });
+
+      // convenience: press Ctrl+Enter in log to connect
+      logEl.addEventListener("keydown", (e) => {
+        if (e.ctrlKey && e.key === "Enter") btnConn.click();
+      });
+
+      // on load, enable/disable
+      setControls("idle");
+      if (store.k) toast("key loaded");
+    </script>
+  </body>
+</html>
