@@ -8,12 +8,10 @@
       :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
       body { margin: 24px; display: grid; gap: 14px; max-width: 920px; }
       .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-      input[type=text], input[type=password], select {
-        padding: 10px 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 8px; flex: 1;
-      }
+      input[type=text], input[type=password], select { padding: 10px 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 8px; flex: 1; }
       button { padding: 10px 14px; font-size: 16px; border-radius: 8px; border: 1px solid #ccc; background: #f6f6f6; cursor: pointer; }
       button:disabled { opacity: .5; cursor: not-allowed; }
-      #log { white-space: pre-wrap; background: #0c0f12; color: #c9f0ff; padding: 12px; border-radius: 10px; height: 180px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      #log { white-space: pre-wrap; background: #0c0f12; color: #c9f0ff; padding: 12px; border-radius: 10px; height: 180px; overflow: auto; font-family: ui-monospace, Menlo, Consolas, monospace; }
       .tag { font-size: 12px; padding: 2px 6px; border-radius: 999px; background: #eef; color: #223; }
       .panel { border:1px solid #e6e6e6; border-radius:12px; overflow:hidden; }
       .panel h3 { margin:0; padding:10px 12px; background:#f7f7f7; border-bottom:1px solid #e6e6e6; }
@@ -71,7 +69,7 @@
 
     <script>
       const $ = (id) => document.getElementById(id);
-      const elKey   = $("apiKey");
+      const elKey = $("apiKey");
       const elModel = $("model");
       const elVoice = $("voice");
       const btnSave = $("saveKey");
@@ -79,14 +77,14 @@
       const btnMute = $("mute");
       const btnHang = $("hangup");
       const btnSend = $("send");
-      const input   = $("text");
-      const logEl   = $("log");
-      const statusEl= $("status");
-      const exWrap  = $("exchanges");
+      const input = $("text");
+      const logEl = $("log");
+      const statusEl = $("status");
+      const exWrap = $("exchanges");
       const totInEl = $("totIn");
-      const totOutEl= $("totOut");
-      const totAllEl= $("totAll");
-      const rateEl  = $("rate");
+      const totOutEl = $("totOut");
+      const totAllEl = $("totAll");
+      const rateEl = $("rate");
 
       const store = {
         get k() { return localStorage.getItem("OPENAI_API_KEY") || ""; },
@@ -96,7 +94,7 @@
         get v() { return localStorage.getItem("REALTIME_VOICE") || "alloy"; },
         set v(voice) { localStorage.setItem("REALTIME_VOICE", voice); }
       };
-      elKey.value   = store.k;
+      elKey.value = store.k;
       elModel.value = store.m;
       elVoice.value = store.v;
 
@@ -115,45 +113,39 @@
         btnMute.disabled = !connected;
         btnHang.disabled = !connected;
         btnSend.disabled = !connected;
-        input.disabled   = !connected;
+        input.disabled = !connected;
       }
-      function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+      function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
 
       let pc = null, dataChannel = null, localStream = null, remoteAudio = null, micMuted = false;
 
-      // Pairing + buffers
-      const textBuf = Object.create(null);   // responseId -> assistant text (stream/parts/transcripts)
-      const pendingTurns = [];               // FIFO fallback for pairing
-      const turnMap = Object.create(null);   // client_turn_id -> user text (authoritative)
+      const textBuf = Object.create(null);
       let totalIn = 0, totalOut = 0;
-      let lastHeardUserTranscript = "";      // latest user voice transcript from API
 
-      function addExchange(userText, assistantText, inTok, outTok) {
+      function addAssistantExchange(assistantText, inTok, outTok) {
         const row = document.createElement("div");
         row.className = "ex";
         const msg = document.createElement("div");
         msg.className = "msg";
-        msg.innerHTML =
-          `<div><span class="role">You:</span> ${escapeHtml(userText||"")}</div>` +
-          (assistantText ? `<div><span class="role">Assistant:</span> ${escapeHtml(assistantText)}</div>` : "");
+        msg.innerHTML = `<div><span class="role">${store.v}:</span> ${escapeHtml(assistantText || "")}</div>`;
         const tok = document.createElement("div");
         tok.className = "tok";
         const inS = inTok || 0, outS = outTok || 0;
         tok.textContent = `in: ${inS} | out: ${outS} | turn: ${inS + outS}`;
-        row.appendChild(msg); row.appendChild(tok);
+        row.appendChild(msg);
+        row.appendChild(tok);
         exWrap.appendChild(row);
         exWrap.scrollTop = exWrap.scrollHeight;
-
         totalIn += inS; totalOut += outS;
-        totInEl.textContent  = "In: " + totalIn;
+        totInEl.textContent = "In: " + totalIn;
         totOutEl.textContent = "Out: " + totalOut;
         totAllEl.textContent = "Total: " + (totalIn + totalOut);
       }
 
       async function connect() {
         const API_KEY = (elKey.value || "").trim();
-        const MODEL   = (elModel.value || "gpt-realtime").trim();
-        const VOICE   = elVoice.value;
+        const MODEL = (elModel.value || "gpt-realtime").trim();
+        const VOICE = elVoice.value;
         if (!API_KEY) { toast("Missing API key"); return; }
 
         setControls(false);
@@ -164,143 +156,86 @@
 
         pc = new RTCPeerConnection({ iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] });
 
-        // Send mic upstream (remove to go text-only)
         for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
 
-        // Receive audio
         remoteAudio = new Audio(); remoteAudio.autoplay = true;
         pc.ontrack = (e) => { const [stream] = e.streams; remoteAudio.srcObject = stream; };
 
         dataChannel = pc.createDataChannel("oai-events");
-        dataChannel.onopen = () => { log("[dc] open"); console.log("[DC] open"); };
-        dataChannel.onclose = () => { log("[dc] close"); console.log("[DC] close"); };
-        dataChannel.onerror = (e) => { log("[dc] error " + (e?.message || e)); console.error("[DC] error", e); };
+        dataChannel.onopen = () => { log("[dc] open"); };
+        dataChannel.onclose = () => { log("[dc] close"); };
+        dataChannel.onerror = (e) => { log("[dc] error " + (e?.message || e)); };
 
         dataChannel.onmessage = (e) => {
           let msg;
-          try { msg = JSON.parse(e.data); } catch { console.log("[EVT:raw]", e.data); return; }
+          try { msg = JSON.parse(e.data); } catch { return; }
           const t = msg.type;
-          console.log("[EVT]", t, msg);
 
-          // STREAMED TEXT
           if (t === "response.output_text.delta" || t === "response.text.delta") {
             const id = msg.response_id || msg.response?.id || "r";
             const d = msg.delta || "";
             textBuf[id] = (textBuf[id] || "") + d;
-            console.log("[ASSIST:delta]", d);
             return;
           }
 
-          // PART: TEXT
           if (t === "response.content_part.done" && msg.part?.type === "text") {
             const id = msg.response_id || "r";
             const s = msg.part.text || "";
             textBuf[id] = (textBuf[id] || "") + s;
-            console.log("[ASSIST:part:text]", s);
             return;
           }
 
-          // PART: AUDIO with TRANSCRIPT  <<<<<<<<<<<<<<  (what you showed)
+          /* FIX: assistant audio transcripts belong to assistant */
           if (t === "response.content_part.done" && msg.part?.type === "audio" && msg.part?.transcript) {
             const id = msg.response_id || "r";
             const s = msg.part.transcript || "";
             textBuf[id] = (textBuf[id] || "") + s;
-            console.log("[ASSIST:audio.transcript]", s);
             return;
           }
 
-          // OUTPUT ITEM DONE (assistant message)
           if (t === "response.output_item.done" && msg.item?.type === "message" && msg.item?.role === "assistant") {
             const id = msg.response_id || "r";
             const texts = (msg.item.content || []).filter(x => x.type === "text").map(x => x.text || "");
-            if (texts.length) {
-              const joined = texts.join(" ");
-              textBuf[id] = (textBuf[id] || "") + joined;
-              console.log("[ASSIST:item]", joined);
-            }
+            if (texts.length) textBuf[id] = (textBuf[id] || "") + texts.join(" ");
             return;
           }
 
-          // Assistant mirror
           if (t === "conversation.item.created" && msg.item?.type === "message" && msg.item?.role === "assistant") {
             const id = msg.response_id || "r";
             const texts = (msg.item.content || []).filter(x => x.type === "text").map(x => x.text || "");
-            if (texts.length) {
-              const joined = texts.join(" ");
-              textBuf[id] = (textBuf[id] || "") + joined;
-              console.log("[ASSIST:conv]", joined);
-            }
+            if (texts.length) textBuf[id] = (textBuf[id] || "") + texts.join(" ");
             return;
           }
 
-          // USER INPUT TRANSCRIPTION (voice) — handle several possible names
           if (
             t === "input_audio_transcription.completed" ||
             t === "response.input_audio_transcription.completed" ||
             t === "conversation.item.input_audio_transcription.completed"
           ) {
             const transcript = msg.transcript || msg.text || msg.result?.text || "";
-            if (transcript) {
-              lastHeardUserTranscript = transcript;
-              console.log("[YOU:transcript]", transcript);
-
-              // Fill the earliest empty pending turn (if any)
-              for (let i = 0; i < pendingTurns.length; i++) {
-                if (!pendingTurns[i].text) { pendingTurns[i].text = transcript; break; }
-              }
-            }
+            if (transcript) log("[you] " + transcript);
             return;
           }
 
-          // When a response starts, open a blank pending turn (common for VAD)
-          if (t === "response.created") {
-            const last = pendingTurns[pendingTurns.length - 1];
-            if (!last || last.text) pendingTurns.push({ text: null });
-            console.log("[TURN:start] pending size:", pendingTurns.length);
-            return;
-          }
-
-          // Rate limits
           if (t === "rate_limits.updated") {
             const lim = msg.rate_limits?.find?.(x => x.name === "tokens");
-            if (lim) {
-              rateEl.textContent = `Rate remaining: ${lim.remaining}/${lim.limit}`;
-              console.log("[RATE] tokens", lim);
-            }
+            if (lim) rateEl.textContent = `Rate remaining: ${lim.remaining}/${lim.limit}`;
             return;
           }
 
-          // Finalize turn
           if (t === "response.done" && msg.response) {
             const id = msg.response.id || msg.response_id || "r";
             const assistantText = (textBuf[id] || "").trim();
             delete textBuf[id];
 
-            const turnId = msg.response.metadata?.client_turn_id;
-            let userText = (turnId && turnMap[turnId] !== undefined) ? turnMap[turnId] : undefined;
-            if (turnId && turnMap[turnId] !== undefined) delete turnMap[turnId];
-
-            if (userText === undefined) {
-              const turn = pendingTurns.shift() || { text: null };
-              userText = (turn.text || lastHeardUserTranscript || "");
-            }
-
             const usage = msg.response.usage || msg.usage || {};
-            const inTok  = usage.input_tokens ?? usage.input_token_details?.text_tokens ?? 0;
+            const inTok = usage.input_tokens ?? usage.input_token_details?.text_tokens ?? 0;
             const outTok = usage.output_tokens ?? usage.output_token_details?.text_tokens ?? 0;
 
-            console.log("[TURN DONE]", { turnId, userText, assistantText, inTok, outTok, usage });
-
             if (assistantText) log("[assistant] " + assistantText);
-            addExchange(userText, assistantText, inTok, outTok);
-
-            // reset last-heard so it isn't reused
-            lastHeardUserTranscript = "";
+            addAssistantExchange(assistantText, inTok, outTok);
             return;
           }
-
-          // Unhandled
-          console.log("[EVT:unhandled]", msg);
         };
 
         const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: false });
@@ -340,25 +275,17 @@
 
       function sendText(text) {
         if (!dataChannel || dataChannel.readyState !== "open") return;
-
-        // Pair with client_turn_id + FIFO fallback
-        const turnId = "turn_" + Date.now() + "_" + Math.random().toString(36).slice(2,8);
-        turnMap[turnId] = text;
-        pendingTurns.push({ text });
-
         const createItem = {
           type: "conversation.item.create",
           item: { type: "message", role: "user", content: [{ type: "input_text", text }] }
         };
         const respond = {
           type: "response.create",
-          response: { modalities: ["audio", "text"], metadata: { client_turn_id: turnId } }
+          response: { modalities: ["audio", "text"] }
         };
-
         dataChannel.send(JSON.stringify(createItem));
         dataChannel.send(JSON.stringify(respond));
         log("[you] " + text);
-        console.log("[YOU]", { text, turnId });
       }
 
       function toggleMute() {
@@ -378,16 +305,16 @@
         log("[sys] disconnected");
       }
 
-      btnConn.onclick = connect;
-      btnMute.onclick = toggleMute;
-      btnHang.onclick = hangup;
-      btnSend.onclick = () => {
+      $("connect").onclick = connect;
+      $("mute").onclick = toggleMute;
+      $("hangup").onclick = hangup;
+      $("send").onclick = () => {
         const t = input.value.trim();
         if (!t) return;
         sendText(t);
         input.value = "";
       };
-      input.addEventListener("keydown", (e) => { if (e.key === "Enter") btnSend.click(); });
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") $("send").click(); });
 
       setControls("idle");
       if (store.k) toast("key loaded");
