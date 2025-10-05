@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Realtime (Browser-only, Debug Logging)</title>
+    <title>Realtime (Local Transcription, Text-Only)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
       :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
@@ -11,6 +11,8 @@
       input[type=text], input[type=password], select { padding: 10px 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 8px; flex: 1; }
       button { padding: 10px 14px; font-size: 16px; border-radius: 8px; border: 1px solid #ccc; background: #f6f6f6; cursor: pointer; }
       button:disabled { opacity: .5; cursor: not-allowed; }
+      button.active { background: #ffcccc; }
+      button.warning { background: #ffffcc; }
       #log { white-space: pre-wrap; background: #0c0f12; color: #c9f0ff; padding: 12px; border-radius: 10px; height: 180px; overflow: auto; font-family: ui-monospace, Menlo, Consolas, monospace; }
       .tag { font-size: 12px; padding: 2px 6px; border-radius: 999px; background: #eef; color: #223; }
       .panel { border:1px solid #e6e6e6; border-radius:12px; overflow:hidden; }
@@ -24,10 +26,14 @@
       .totals { display:flex; gap:12px; padding:10px 12px; background:#fafafa; border-top:1px solid #e6e6e6; }
       .totals div { font: 13px ui-monospace, Menlo, Consolas, monospace; }
       .muted { color:#777; }
+      #transcript { background: #f0f0f0; padding: 8px 12px; border-radius: 8px; min-height: 20px; margin-top: 8px; }
+      .listening { animation: pulse 1.5s infinite; }
+      .waiting { background: #fff3cd; }
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
     </style>
   </head>
   <body>
-    <h1>Realtime Voice — Browser Only</h1>
+    <h1>Realtime Voice — Local Transcription</h1>
 
     <div class="row">
       <input id="apiKey" type="password" placeholder="OPENAI_API_KEY (stored locally)" />
@@ -43,15 +49,17 @@
 
     <div class="row">
       <button id="connect">Connect</button>
-      <button id="mute" disabled>Mute Mic</button>
+      <button id="listen">Start Listening</button>
       <button id="hangup" disabled>Hang Up</button>
       <span class="tag" id="status">idle</span>
     </div>
 
     <div class="row">
-      <input id="text" type="text" placeholder="Type and Send, or just speak…" />
+      <input id="text" type="text" placeholder="Type and Send, or use voice recognition…" />
       <button id="send" disabled>Send</button>
     </div>
+
+    <div id="transcript">Speech will appear here...</div>
 
     <div class="panel">
       <h3>Exchanges</h3>
@@ -74,7 +82,7 @@
       const elVoice = $("voice");
       const btnSave = $("saveKey");
       const btnConn = $("connect");
-      const btnMute = $("mute");
+      const btnListen = $("listen");
       const btnHang = $("hangup");
       const btnSend = $("send");
       const input = $("text");
@@ -85,6 +93,7 @@
       const totOutEl = $("totOut");
       const totAllEl = $("totAll");
       const rateEl = $("rate");
+      const transcriptEl = $("transcript");
 
       const store = {
         get k() { return localStorage.getItem("OPENAI_API_KEY") || ""; },
@@ -110,24 +119,141 @@
       function setControls(state) {
         const connected = state === "connected";
         btnConn.disabled = connected;
-        btnMute.disabled = !connected;
         btnHang.disabled = !connected;
         btnSend.disabled = !connected;
         input.disabled = !connected;
       }
       function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
 
-      let pc = null, dataChannel = null, localStream = null, remoteAudio = null, micMuted = false;
+      let pc = null, dataChannel = null, remoteAudio = null;
+      let recognition = null;
+      let isListening = false;
+      let assistantSpeaking = false;
+      let shouldBeListening = false; // Track user's intent to listen
 
       const textBuf = Object.create(null);
       let totalIn = 0, totalOut = 0;
 
-      function addAssistantExchange(assistantText, inTok, outTok) {
+      // Initialize Speech Recognition
+      function initSpeechRecognition() {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+          log("[err] Speech recognition not supported in this browser");
+          btnListen.disabled = true;
+          return;
+        }
+
+        recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+
+        recognition.onstart = () => {
+          isListening = true;
+          btnListen.textContent = "Stop Listening";
+          btnListen.classList.add("active");
+          transcriptEl.classList.add("listening");
+          transcriptEl.classList.remove("waiting");
+          if (!assistantSpeaking) {
+            transcriptEl.textContent = "Listening...";
+          }
+          log("[speech] recognition started");
+        };
+
+        recognition.onend = () => {
+          isListening = false;
+          transcriptEl.classList.remove("listening");
+          log("[speech] recognition ended");
+          
+          // Auto-restart if user wants to keep listening and we're not hanging up
+          if (shouldBeListening && pc && dataChannel) {
+            setTimeout(() => {
+              if (shouldBeListening && pc && dataChannel) {
+                log("[speech] auto-restarting recognition");
+                try {
+                  recognition.start();
+                } catch (e) {
+                  log("[speech] restart error: " + e.message);
+                }
+              }
+            }, 100);
+          } else {
+            // User explicitly stopped or connection closed
+            btnListen.textContent = "Start Listening";
+            btnListen.classList.remove("active");
+            transcriptEl.textContent = "Speech will appear here...";
+          }
+        };
+
+        recognition.onresult = (event) => {
+          // Ignore results while assistant is speaking
+          if (assistantSpeaking) {
+            log("[speech] ignored result - assistant speaking");
+            return;
+          }
+          
+          let interimTranscript = "";
+          let finalTranscript = "";
+
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const transcript = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+              finalTranscript += transcript;
+              // Send final transcript immediately
+              if (dataChannel && dataChannel.readyState === "open") {
+                sendText(transcript.trim());
+              }
+            } else {
+              interimTranscript += transcript;
+            }
+          }
+
+          // Show both interim and final in the UI
+          transcriptEl.textContent = finalTranscript + interimTranscript;
+        };
+
+        recognition.onerror = (event) => {
+          log("[speech] error: " + event.error);
+          if (event.error === 'no-speech') {
+            if (!assistantSpeaking) {
+              transcriptEl.textContent = "No speech detected...";
+            }
+          }
+        };
+      }
+
+      btnListen.onclick = () => {
+        if (!recognition) {
+          initSpeechRecognition();
+        }
+        
+        if (shouldBeListening) {
+          // User wants to stop listening
+          shouldBeListening = false;
+          if (isListening) {
+            recognition.stop();
+          }
+          btnListen.textContent = "Start Listening";
+          btnListen.classList.remove("active");
+          transcriptEl.classList.remove("listening");
+          transcriptEl.textContent = "Speech will appear here...";
+          log("[speech] stopped by user");
+        } else {
+          // User wants to start listening
+          shouldBeListening = true;
+          if (!isListening) {
+            recognition.start();
+          }
+        }
+      };
+
+      function addExchange(role, text, inTok, outTok) {
         const row = document.createElement("div");
         row.className = "ex";
         const msg = document.createElement("div");
         msg.className = "msg";
-        msg.innerHTML = `<div><span class="role">${store.v}:</span> ${escapeHtml(assistantText || "")}</div>`;
+        const displayRole = role === "assistant" ? store.v : "you";
+        msg.innerHTML = `<div><span class="role">${displayRole}:</span> ${escapeHtml(text || "")}</div>`;
         const tok = document.createElement("div");
         tok.className = "tok";
         const inS = inTok || 0, outS = outTok || 0;
@@ -151,15 +277,16 @@
         setControls(false);
         toast("connecting…");
 
-        try { localStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-        catch (e) { log("[err] mic permission failed: " + e); toast("mic blocked"); return; }
-
         pc = new RTCPeerConnection({ iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] });
 
-        for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
-
-        remoteAudio = new Audio(); remoteAudio.autoplay = true;
-        pc.ontrack = (e) => { const [stream] = e.streams; remoteAudio.srcObject = stream; };
+        // No local audio tracks needed - we're only receiving audio
+        remoteAudio = new Audio();
+        remoteAudio.autoplay = true;
+        pc.ontrack = (e) => {
+          const [stream] = e.streams;
+          remoteAudio.srcObject = stream;
+          log("[audio] remote track received");
+        };
 
         dataChannel = pc.createDataChannel("oai-events");
         dataChannel.onopen = () => { log("[dc] open"); };
@@ -170,6 +297,17 @@
           let msg;
           try { msg = JSON.parse(e.data); } catch { return; }
           const t = msg.type;
+
+          // Track when response starts
+          if (t === "response.created" || t === "response.output_item.added") {
+            if (!assistantSpeaking) {
+              assistantSpeaking = true;
+              transcriptEl.textContent = "Assistant is speaking...";
+              transcriptEl.classList.add("waiting");
+              transcriptEl.classList.remove("listening");
+              log("[speech] assistant responding");
+            }
+          }
 
           if (t === "response.output_text.delta" || t === "response.text.delta") {
             const id = msg.response_id || msg.response?.id || "r";
@@ -185,7 +323,6 @@
             return;
           }
 
-          /* FIX: assistant audio transcripts belong to assistant */
           if (t === "response.content_part.done" && msg.part?.type === "audio" && msg.part?.transcript) {
             const id = msg.response_id || "r";
             const s = msg.part.transcript || "";
@@ -207,16 +344,6 @@
             return;
           }
 
-          if (
-            t === "input_audio_transcription.completed" ||
-            t === "response.input_audio_transcription.completed" ||
-            t === "conversation.item.input_audio_transcription.completed"
-          ) {
-            const transcript = msg.transcript || msg.text || msg.result?.text || "";
-            if (transcript) log("[you] " + transcript);
-            return;
-          }
-
           if (t === "rate_limits.updated") {
             const lim = msg.rate_limits?.find?.(x => x.name === "tokens");
             if (lim) rateEl.textContent = `Rate remaining: ${lim.remaining}/${lim.limit}`;
@@ -233,12 +360,30 @@
             const outTok = usage.output_tokens ?? usage.output_token_details?.text_tokens ?? 0;
 
             if (assistantText) log("[assistant] " + assistantText);
-            addAssistantExchange(assistantText, inTok, outTok);
+            addExchange("assistant", assistantText, inTok, outTok);
+            
+            // Assistant finished - wait briefly for audio to complete, then resume listening
+            setTimeout(() => {
+              assistantSpeaking = false;
+              transcriptEl.classList.remove("waiting");
+              
+              // If user has listening enabled, show listening state
+              if (shouldBeListening) {
+                transcriptEl.textContent = "Listening...";
+                transcriptEl.classList.add("listening");
+                log("[speech] assistant done - listening resumed");
+              } else {
+                transcriptEl.textContent = "Ready to listen...";
+              }
+            }, 1500);
             return;
           }
         };
 
-        const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: false });
+        const offer = await pc.createOffer({ 
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: false 
+        });
         await pc.setLocalDescription(offer);
 
         const createSession = await fetch("https://api.openai.com/v1/realtime/sessions", {
@@ -252,61 +397,95 @@
             model: MODEL,
             voice: VOICE,
             output_audio_format: "pcm16",
-            instructions: "You are a concise, friendly voice assistant. Keep replies short."
+            instructions: "You are a concise, friendly voice assistant. Keep replies short. The user is sending text messages only, not audio."
           })
         });
-        if (!createSession.ok) { log("[err] session: " + (await createSession.text())); toast("session failed"); return; }
+        if (!createSession.ok) { 
+          log("[err] session: " + (await createSession.text())); 
+          toast("session failed"); 
+          return; 
+        }
         const { client_secret } = await createSession.json();
         const token = client_secret?.value || client_secret;
 
         const sdpRes = await fetch("https://api.openai.com/v1/realtime?model=" + encodeURIComponent(MODEL), {
           method: "POST",
-          headers: { Authorization: "Bearer " + token, "Content-Type": "application/sdp", "OpenAI-Beta": "realtime=v1" },
+          headers: { 
+            Authorization: "Bearer " + token, 
+            "Content-Type": "application/sdp", 
+            "OpenAI-Beta": "realtime=v1" 
+          },
           body: offer.sdp
         });
-        if (!sdpRes.ok) { log("[err] sdp: " + (await sdpRes.text())); toast("SDP failed"); return; }
+        if (!sdpRes.ok) { 
+          log("[err] sdp: " + (await sdpRes.text())); 
+          toast("SDP failed"); 
+          return; 
+        }
         const answerSdp = await sdpRes.text();
         await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
 
         setControls("connected");
         toast("connected");
-        log("[sys] connected via WebRTC");
+        log("[sys] connected via WebRTC (text-only input, audio output)");
+        
+        // Initialize speech recognition after connection
+        initSpeechRecognition();
       }
 
       function sendText(text) {
         if (!dataChannel || dataChannel.readyState !== "open") return;
+
+        const finalPrompt = `
+          FOR LLMs:
+          You are a tequila expert and mixologist. You only want to talk about tequila and tequila-based drinks.
+          You are hip and snarky, and sprinkle a bit of "Spanglish" into your replies.
+          Keep your replies short and to the point, no more than 2-3 sentences.
+          ONLY RESPOND IN ENGLISH. ONLY TALK ABOUT TEQUILA.
+          -----
+          THE USER SAID:
+          ${text}
+        `;
+
         const createItem = {
           type: "conversation.item.create",
-          item: { type: "message", role: "user", content: [{ type: "input_text", text }] }
+          item: { 
+            type: "message", 
+            role: "user", 
+            content: [{ type: "input_text", text: finalPrompt }] 
+          }
         };
         const respond = {
           type: "response.create",
-          response: { modalities: ["audio", "text"] }
+          response: { 
+            modalities: ["audio", "text"]
+          }
         };
         dataChannel.send(JSON.stringify(createItem));
         dataChannel.send(JSON.stringify(respond));
         log("[you] " + text);
-      }
-
-      function toggleMute() {
-        if (!localStream) return;
-        micMuted = !micMuted;
-        localStream.getAudioTracks().forEach((t) => (t.enabled = !micMuted));
-        btnMute.textContent = micMuted ? "Unmute Mic" : "Mute Mic";
+        
+        // Add user message to exchanges (show original text, not the prompt)
+        addExchange("user", text, 0, 0);
       }
 
       function hangup() {
+        // Stop listening when hanging up
+        shouldBeListening = false;
+        if (recognition && isListening) {
+          recognition.stop();
+        }
+        
         try { dataChannel?.close(); } catch {}
-        try { pc?.getSenders().forEach((s) => s.track && s.track.stop()); } catch {}
         try { pc?.close(); } catch {}
-        pc = null; dataChannel = null; localStream = null; remoteAudio = null;
+        pc = null; dataChannel = null; remoteAudio = null;
+        assistantSpeaking = false;
         setControls("idle");
         toast("idle");
         log("[sys] disconnected");
       }
 
       $("connect").onclick = connect;
-      $("mute").onclick = toggleMute;
       $("hangup").onclick = hangup;
       $("send").onclick = () => {
         const t = input.value.trim();
@@ -314,7 +493,9 @@
         sendText(t);
         input.value = "";
       };
-      input.addEventListener("keydown", (e) => { if (e.key === "Enter") $("send").click(); });
+      input.addEventListener("keydown", (e) => { 
+        if (e.key === "Enter") $("send").click(); 
+      });
 
       setControls("idle");
       if (store.k) toast("key loaded");
