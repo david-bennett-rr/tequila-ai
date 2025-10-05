@@ -1,27 +1,31 @@
-<!-- index.html
-Pure-browser Realtime (WebRTC) client.
-Stores your API key locally (localStorage). No server needed.
--->
 <!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Realtime (Browser-only)</title>
+    <title>Realtime (Browser-only, Debug Logging)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
       :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-      body { margin: 24px; display: grid; gap: 14px; max-width: 820px; }
+      body { margin: 24px; display: grid; gap: 14px; max-width: 920px; }
       .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
       input[type=text], input[type=password], select {
         padding: 10px 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 8px; flex: 1;
       }
       button { padding: 10px 14px; font-size: 16px; border-radius: 8px; border: 1px solid #ccc; background: #f6f6f6; cursor: pointer; }
       button:disabled { opacity: .5; cursor: not-allowed; }
-      #log { white-space: pre-wrap; background: #0c0f12; color: #c9f0ff; padding: 12px; border-radius: 10px; height: 250px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      #log { white-space: pre-wrap; background: #0c0f12; color: #c9f0ff; padding: 12px; border-radius: 10px; height: 180px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
       .tag { font-size: 12px; padding: 2px 6px; border-radius: 999px; background: #eef; color: #223; }
-      .sep { height: 1px; background: #e6e6e6; margin: 8px 0; }
-      .pill { display: inline-flex; gap: 6px; align-items: center; }
-      .small { font-size: 12px; color: #666; }
+      .panel { border:1px solid #e6e6e6; border-radius:12px; overflow:hidden; }
+      .panel h3 { margin:0; padding:10px 12px; background:#f7f7f7; border-bottom:1px solid #e6e6e6; }
+      .exchanges { display:grid; }
+      .ex { display:grid; grid-template-columns: 1fr 220px; gap:12px; padding:12px; border-top:1px solid #f0f0f0; }
+      .ex:first-child { border-top: none; }
+      .msg { line-height:1.35; }
+      .role { font-weight:600; margin-right:6px; }
+      .tok { font: 12px/1.2 ui-monospace, Menlo, Consolas, monospace; color:#444; }
+      .totals { display:flex; gap:12px; padding:10px 12px; background:#fafafa; border-top:1px solid #e6e6e6; }
+      .totals div { font: 13px ui-monospace, Menlo, Consolas, monospace; }
+      .muted { color:#777; }
     </style>
   </head>
   <body>
@@ -43,7 +47,7 @@ Stores your API key locally (localStorage). No server needed.
       <button id="connect">Connect</button>
       <button id="mute" disabled>Mute Mic</button>
       <button id="hangup" disabled>Hang Up</button>
-      <span class="pill"><span class="tag" id="status">idle</span></span>
+      <span class="tag" id="status">idle</span>
     </div>
 
     <div class="row">
@@ -51,11 +55,21 @@ Stores your API key locally (localStorage). No server needed.
       <button id="send" disabled>Send</button>
     </div>
 
-    <div class="sep"></div>
-    <div id="log"></div>
-    <div class="small">Tip: your API key and last settings are saved in <code>localStorage</code> only on this machine.</div>
+    <div class="panel">
+      <h3>Exchanges</h3>
+      <div id="exchanges" class="exchanges"></div>
+      <div class="totals">
+        <div id="totIn">In: 0</div>
+        <div id="totOut">Out: 0</div>
+        <div id="totAll">Total: 0</div>
+        <div id="rate" class="muted"></div>
+      </div>
+    </div>
 
-    <script type="module">
+    <h3>Debug</h3>
+    <div id="log"></div>
+
+    <script>
       const $ = (id) => document.getElementById(id);
       const elKey   = $("apiKey");
       const elModel = $("model");
@@ -68,8 +82,12 @@ Stores your API key locally (localStorage). No server needed.
       const input   = $("text");
       const logEl   = $("log");
       const statusEl= $("status");
+      const exWrap  = $("exchanges");
+      const totInEl = $("totIn");
+      const totOutEl= $("totOut");
+      const totAllEl= $("totAll");
+      const rateEl  = $("rate");
 
-      // Persist simple settings locally
       const store = {
         get k() { return localStorage.getItem("OPENAI_API_KEY") || ""; },
         set k(v) { localStorage.setItem("OPENAI_API_KEY", v); },
@@ -89,7 +107,7 @@ Stores your API key locally (localStorage). No server needed.
         toast("Saved.");
       };
 
-      function log(s) { logEl.textContent += s + "\\n"; logEl.scrollTop = logEl.scrollHeight; }
+      function log(s) { logEl.textContent += s + "\n"; logEl.scrollTop = logEl.scrollHeight; }
       function toast(s) { statusEl.textContent = s; }
       function setControls(state) {
         const connected = state === "connected";
@@ -99,12 +117,38 @@ Stores your API key locally (localStorage). No server needed.
         btnSend.disabled = !connected;
         input.disabled   = !connected;
       }
+      function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
-      let pc = null;
-      let dataChannel = null;
-      let localStream = null;
-      let remoteAudio = null;
-      let micMuted = false;
+      let pc = null, dataChannel = null, localStream = null, remoteAudio = null, micMuted = false;
+
+      // Pairing + buffers
+      const textBuf = Object.create(null);   // responseId -> assistant text (stream/parts/transcripts)
+      const pendingTurns = [];               // FIFO fallback for pairing
+      const turnMap = Object.create(null);   // client_turn_id -> user text (authoritative)
+      let totalIn = 0, totalOut = 0;
+      let lastHeardUserTranscript = "";      // latest user voice transcript from API
+
+      function addExchange(userText, assistantText, inTok, outTok) {
+        const row = document.createElement("div");
+        row.className = "ex";
+        const msg = document.createElement("div");
+        msg.className = "msg";
+        msg.innerHTML =
+          `<div><span class="role">You:</span> ${escapeHtml(userText||"")}</div>` +
+          (assistantText ? `<div><span class="role">Assistant:</span> ${escapeHtml(assistantText)}</div>` : "");
+        const tok = document.createElement("div");
+        tok.className = "tok";
+        const inS = inTok || 0, outS = outTok || 0;
+        tok.textContent = `in: ${inS} | out: ${outS} | turn: ${inS + outS}`;
+        row.appendChild(msg); row.appendChild(tok);
+        exWrap.appendChild(row);
+        exWrap.scrollTop = exWrap.scrollHeight;
+
+        totalIn += inS; totalOut += outS;
+        totInEl.textContent  = "In: " + totalIn;
+        totOutEl.textContent = "Out: " + totalOut;
+        totAllEl.textContent = "Total: " + (totalIn + totalOut);
+      }
 
       async function connect() {
         const API_KEY = (elKey.value || "").trim();
@@ -115,55 +159,153 @@ Stores your API key locally (localStorage). No server needed.
         setControls(false);
         toast("connecting…");
 
-        // Mic capture
-        try {
-          localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        } catch (e) {
-          log("[err] mic permission failed: " + e);
-          toast("mic blocked");
-          return;
-        }
+        try { localStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+        catch (e) { log("[err] mic permission failed: " + e); toast("mic blocked"); return; }
 
-        // Peer connection
         pc = new RTCPeerConnection({ iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] });
 
-        // Send mic
+        // Send mic upstream (remove to go text-only)
         for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
 
         // Receive audio
-        remoteAudio = new Audio();
-        remoteAudio.autoplay = true;
-        pc.ontrack = (e) => {
-          const [stream] = e.streams;
-          remoteAudio.srcObject = stream;
-        };
+        remoteAudio = new Audio(); remoteAudio.autoplay = true;
+        pc.ontrack = (e) => { const [stream] = e.streams; remoteAudio.srcObject = stream; };
 
-        // Data channel for events (JSON realtime protocol)
         dataChannel = pc.createDataChannel("oai-events");
-        dataChannel.onopen = () => log("[dc] open");
-        dataChannel.onclose = () => log("[dc] close");
-        dataChannel.onerror = (e) => log("[dc] error " + (e?.message || e));
+        dataChannel.onopen = () => { log("[dc] open"); console.log("[DC] open"); };
+        dataChannel.onclose = () => { log("[dc] close"); console.log("[DC] close"); };
+        dataChannel.onerror = (e) => { log("[dc] error " + (e?.message || e)); console.error("[DC] error", e); };
+
         dataChannel.onmessage = (e) => {
-          try {
-            const msg = JSON.parse(e.data);
-            if (msg.type === "response.output_text.delta") {
-              // stream text deltas if desired:
-              // log(msg.delta);
-            }
-            if (msg.type === "response.output_text.done" && msg.text) {
-              log("[assistant] " + msg.text);
-            }
-          } catch {
-            log("[dc] " + e.data);
+          let msg;
+          try { msg = JSON.parse(e.data); } catch { console.log("[EVT:raw]", e.data); return; }
+          const t = msg.type;
+          console.log("[EVT]", t, msg);
+
+          // STREAMED TEXT
+          if (t === "response.output_text.delta" || t === "response.text.delta") {
+            const id = msg.response_id || msg.response?.id || "r";
+            const d = msg.delta || "";
+            textBuf[id] = (textBuf[id] || "") + d;
+            console.log("[ASSIST:delta]", d);
+            return;
           }
+
+          // PART: TEXT
+          if (t === "response.content_part.done" && msg.part?.type === "text") {
+            const id = msg.response_id || "r";
+            const s = msg.part.text || "";
+            textBuf[id] = (textBuf[id] || "") + s;
+            console.log("[ASSIST:part:text]", s);
+            return;
+          }
+
+          // PART: AUDIO with TRANSCRIPT  <<<<<<<<<<<<<<  (what you showed)
+          if (t === "response.content_part.done" && msg.part?.type === "audio" && msg.part?.transcript) {
+            const id = msg.response_id || "r";
+            const s = msg.part.transcript || "";
+            textBuf[id] = (textBuf[id] || "") + s;
+            console.log("[ASSIST:audio.transcript]", s);
+            return;
+          }
+
+          // OUTPUT ITEM DONE (assistant message)
+          if (t === "response.output_item.done" && msg.item?.type === "message" && msg.item?.role === "assistant") {
+            const id = msg.response_id || "r";
+            const texts = (msg.item.content || []).filter(x => x.type === "text").map(x => x.text || "");
+            if (texts.length) {
+              const joined = texts.join(" ");
+              textBuf[id] = (textBuf[id] || "") + joined;
+              console.log("[ASSIST:item]", joined);
+            }
+            return;
+          }
+
+          // Assistant mirror
+          if (t === "conversation.item.created" && msg.item?.type === "message" && msg.item?.role === "assistant") {
+            const id = msg.response_id || "r";
+            const texts = (msg.item.content || []).filter(x => x.type === "text").map(x => x.text || "");
+            if (texts.length) {
+              const joined = texts.join(" ");
+              textBuf[id] = (textBuf[id] || "") + joined;
+              console.log("[ASSIST:conv]", joined);
+            }
+            return;
+          }
+
+          // USER INPUT TRANSCRIPTION (voice) — handle several possible names
+          if (
+            t === "input_audio_transcription.completed" ||
+            t === "response.input_audio_transcription.completed" ||
+            t === "conversation.item.input_audio_transcription.completed"
+          ) {
+            const transcript = msg.transcript || msg.text || msg.result?.text || "";
+            if (transcript) {
+              lastHeardUserTranscript = transcript;
+              console.log("[YOU:transcript]", transcript);
+
+              // Fill the earliest empty pending turn (if any)
+              for (let i = 0; i < pendingTurns.length; i++) {
+                if (!pendingTurns[i].text) { pendingTurns[i].text = transcript; break; }
+              }
+            }
+            return;
+          }
+
+          // When a response starts, open a blank pending turn (common for VAD)
+          if (t === "response.created") {
+            const last = pendingTurns[pendingTurns.length - 1];
+            if (!last || last.text) pendingTurns.push({ text: null });
+            console.log("[TURN:start] pending size:", pendingTurns.length);
+            return;
+          }
+
+          // Rate limits
+          if (t === "rate_limits.updated") {
+            const lim = msg.rate_limits?.find?.(x => x.name === "tokens");
+            if (lim) {
+              rateEl.textContent = `Rate remaining: ${lim.remaining}/${lim.limit}`;
+              console.log("[RATE] tokens", lim);
+            }
+            return;
+          }
+
+          // Finalize turn
+          if (t === "response.done" && msg.response) {
+            const id = msg.response.id || msg.response_id || "r";
+            const assistantText = (textBuf[id] || "").trim();
+            delete textBuf[id];
+
+            const turnId = msg.response.metadata?.client_turn_id;
+            let userText = (turnId && turnMap[turnId] !== undefined) ? turnMap[turnId] : undefined;
+            if (turnId && turnMap[turnId] !== undefined) delete turnMap[turnId];
+
+            if (userText === undefined) {
+              const turn = pendingTurns.shift() || { text: null };
+              userText = (turn.text || lastHeardUserTranscript || "");
+            }
+
+            const usage = msg.response.usage || msg.usage || {};
+            const inTok  = usage.input_tokens ?? usage.input_token_details?.text_tokens ?? 0;
+            const outTok = usage.output_tokens ?? usage.output_token_details?.text_tokens ?? 0;
+
+            console.log("[TURN DONE]", { turnId, userText, assistantText, inTok, outTok, usage });
+
+            if (assistantText) log("[assistant] " + assistantText);
+            addExchange(userText, assistantText, inTok, outTok);
+
+            // reset last-heard so it isn't reused
+            lastHeardUserTranscript = "";
+            return;
+          }
+
+          // Unhandled
+          console.log("[EVT:unhandled]", msg);
         };
 
-        // Create offer SDP
         const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: false });
         await pc.setLocalDescription(offer);
 
-        // Create session (ephemeral) directly from the browser
-        // This POST is CORS-enabled. You are placing your key in the client by choice.
         const createSession = await fetch("https://api.openai.com/v1/realtime/sessions", {
           method: "POST",
           headers: {
@@ -178,32 +320,16 @@ Stores your API key locally (localStorage). No server needed.
             instructions: "You are a concise, friendly voice assistant. Keep replies short."
           })
         });
-
-        if (!createSession.ok) {
-          log("[err] session: " + (await createSession.text()));
-          toast("session failed");
-          return;
-        }
+        if (!createSession.ok) { log("[err] session: " + (await createSession.text())); toast("session failed"); return; }
         const { client_secret } = await createSession.json();
-        const token = client_secret?.value || client_secret; // support both shapes
+        const token = client_secret?.value || client_secret;
 
-        // Exchange SDP with the model using the ephemeral token
         const sdpRes = await fetch("https://api.openai.com/v1/realtime?model=" + encodeURIComponent(MODEL), {
           method: "POST",
-          headers: {
-            Authorization: "Bearer " + token,
-            "Content-Type": "application/sdp",
-            "OpenAI-Beta": "realtime=v1"
-          },
+          headers: { Authorization: "Bearer " + token, "Content-Type": "application/sdp", "OpenAI-Beta": "realtime=v1" },
           body: offer.sdp
         });
-
-        if (!sdpRes.ok) {
-          log("[err] sdp: " + (await sdpRes.text()));
-          toast("SDP failed");
-          return;
-        }
-
+        if (!sdpRes.ok) { log("[err] sdp: " + (await sdpRes.text())); toast("SDP failed"); return; }
         const answerSdp = await sdpRes.text();
         await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
 
@@ -214,17 +340,25 @@ Stores your API key locally (localStorage). No server needed.
 
       function sendText(text) {
         if (!dataChannel || dataChannel.readyState !== "open") return;
+
+        // Pair with client_turn_id + FIFO fallback
+        const turnId = "turn_" + Date.now() + "_" + Math.random().toString(36).slice(2,8);
+        turnMap[turnId] = text;
+        pendingTurns.push({ text });
+
         const createItem = {
           type: "conversation.item.create",
           item: { type: "message", role: "user", content: [{ type: "input_text", text }] }
         };
         const respond = {
           type: "response.create",
-          response: { modalities: ["audio", "text"] }
+          response: { modalities: ["audio", "text"], metadata: { client_turn_id: turnId } }
         };
+
         dataChannel.send(JSON.stringify(createItem));
         dataChannel.send(JSON.stringify(respond));
         log("[you] " + text);
+        console.log("[YOU]", { text, turnId });
       }
 
       function toggleMute() {
@@ -244,7 +378,6 @@ Stores your API key locally (localStorage). No server needed.
         log("[sys] disconnected");
       }
 
-      // UI wiring
       btnConn.onclick = connect;
       btnMute.onclick = toggleMute;
       btnHang.onclick = hangup;
@@ -256,12 +389,6 @@ Stores your API key locally (localStorage). No server needed.
       };
       input.addEventListener("keydown", (e) => { if (e.key === "Enter") btnSend.click(); });
 
-      // convenience: press Ctrl+Enter in log to connect
-      logEl.addEventListener("keydown", (e) => {
-        if (e.ctrlKey && e.key === "Enter") btnConn.click();
-      });
-
-      // on load, enable/disable
       setControls("idle");
       if (store.k) toast("key loaded");
     </script>
