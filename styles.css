@@ -1,0 +1,148 @@
+:root { 
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; 
+}
+
+body { 
+  margin: 24px; 
+  display: grid; 
+  gap: 14px; 
+  max-width: 920px; 
+}
+
+.row { 
+  display: flex; 
+  gap: 10px; 
+  flex-wrap: wrap; 
+  align-items: center; 
+}
+
+input[type=text], 
+input[type=password], 
+select { 
+  padding: 10px 12px; 
+  font-size: 16px; 
+  border: 1px solid #ccc; 
+  border-radius: 8px; 
+  flex: 1; 
+}
+
+button { 
+  padding: 10px 14px; 
+  font-size: 16px; 
+  border-radius: 8px; 
+  border: 1px solid #ccc; 
+  background: #f6f6f6; 
+  cursor: pointer; 
+}
+
+button:disabled { 
+  opacity: .5; 
+  cursor: not-allowed; 
+}
+
+button.active { 
+  background: #ffcccc; 
+}
+
+button.warning { 
+  background: #ffffcc; 
+}
+
+#log { 
+  white-space: pre-wrap; 
+  background: #0c0f12; 
+  color: #c9f0ff; 
+  padding: 12px; 
+  border-radius: 10px; 
+  height: 180px; 
+  overflow: auto; 
+  font-family: ui-monospace, Menlo, Consolas, monospace; 
+}
+
+.tag { 
+  font-size: 12px; 
+  padding: 2px 6px; 
+  border-radius: 999px; 
+  background: #eef; 
+  color: #223; 
+}
+
+.panel { 
+  border: 1px solid #e6e6e6; 
+  border-radius: 12px; 
+  overflow: hidden; 
+}
+
+.panel h3 { 
+  margin: 0; 
+  padding: 10px 12px; 
+  background: #f7f7f7; 
+  border-bottom: 1px solid #e6e6e6; 
+}
+
+.exchanges { 
+  display: grid; 
+}
+
+.ex { 
+  display: grid; 
+  grid-template-columns: 1fr 220px; 
+  gap: 12px; 
+  padding: 12px; 
+  border-top: 1px solid #f0f0f0; 
+}
+
+.ex:first-child { 
+  border-top: none; 
+}
+
+.msg { 
+  line-height: 1.35; 
+}
+
+.role { 
+  font-weight: 600; 
+  margin-right: 6px; 
+}
+
+.tok { 
+  font: 12px/1.2 ui-monospace, Menlo, Consolas, monospace; 
+  color: #444; 
+}
+
+.totals { 
+  display: flex; 
+  gap: 12px; 
+  padding: 10px 12px; 
+  background: #fafafa; 
+  border-top: 1px solid #e6e6e6; 
+}
+
+.totals div { 
+  font: 13px ui-monospace, Menlo, Consolas, monospace; 
+}
+
+.muted { 
+  color: #777; 
+}
+
+#transcript { 
+  background: #f0f0f0; 
+  padding: 8px 12px; 
+  border-radius: 8px; 
+  min-height: 20px; 
+  margin-top: 8px; 
+}
+
+.listening { 
+  animation: pulse 1.5s infinite; 
+}
+
+.waiting { 
+  background: #fff3cd; 
+}
+
+@keyframes pulse { 
+  0%, 100% { opacity: 1; } 
+  50% { opacity: 0.6; } 
+}
