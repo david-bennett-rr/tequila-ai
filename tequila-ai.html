@@ -2,61 +2,106 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Realtime (Local Transcription, Text-Only)</title>
+  <title>Realtime Voice Assistant</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <h1>Realtime Voice — Local Transcription</h1>
+  <div class="container">
+    <header>
+      <h1>Voice Assistant</h1>
+      <div class="status-badge" id="status">idle</div>
+    </header>
 
-  <div class="row">
-    <input id="apiKey" type="password" placeholder="OPENAI_API_KEY (stored locally)" />
-    <input id="model" type="text" value="gpt-realtime" />
-    <select id="voice">
-      <option value="alloy">alloy</option>
-      <option value="verse">verse</option>
-      <option value="coral">coral</option>
-      <option value="sage">sage</option>
-    </select>
-    <button id="saveKey">Save</button>
-  </div>
-
-  <div class="row">
-    <button id="connect">Connect</button>
-    <button id="listen">Start Listening</button>
-    <button id="hangup" disabled>Hang Up</button>
-    <span class="tag" id="status">idle</span>
-    <label>
-        <input type="checkbox" id="useSpeech" checked>
-        Enable Speech
-    </label>
-  </div>
-
-  <div class="row">
-    <input id="text" type="text" placeholder="Type and Send, or use voice recognition…" />
-    <button id="send" disabled>Send</button>
-  </div>
-
-  <div id="transcript">Speech will appear here...</div>
-
-  <div class="panel">
-    <h3>Exchanges</h3>
-    <div id="exchanges" class="exchanges"></div>
-    <div class="totals">
-      <div id="totIn">In: 0</div>
-      <div id="totOut">Out: 0</div>
-      <div id="totAll">Total: 0</div>
-      <div id="rate" class="muted"></div>
+    <!-- Settings Card -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Configuration</h2>
+      </div>
+      <div class="card-body">
+        <div class="input-group">
+          <input id="apiKey" type="password" placeholder="OpenAI API Key" />
+          <input id="model" type="text" value="gpt-realtime" placeholder="Model" />
+          <select id="voice">
+            <option value="alloy">Alloy</option>
+            <option value="verse">Verse</option>
+            <option value="coral">Coral</option>
+            <option value="sage">Sage</option>
+          </select>
+        </div>
+        
+        <div class="divider"></div>
+        
+        <div class="input-group">
+          <div class="toggle-group">
+            <label class="toggle">
+              <input type="checkbox" id="useSpeech" checked>
+              <span class="toggle-label">Voice Output</span>
+            </label>
+            <select id="ttsProvider">
+              <option value="openai">OpenAI</option>
+              <option value="elevenlabs">ElevenLabs</option>
+            </select>
+          </div>
+          <input id="elevenLabsKey" type="password" placeholder="ElevenLabs Key (optional)" />
+          <input id="elevenLabsVoice" type="text" placeholder="Voice ID (optional)" />
+        </div>
+        
+        <button id="saveKey" class="btn-primary">Save Configuration</button>
+      </div>
     </div>
-  </div>
 
-  <h3>Debug</h3>
-  <div id="log"></div>
+    <!-- Controls -->
+    <div class="controls">
+      <button id="connect" class="btn-success">Connect</button>
+      <button id="listen" class="btn-secondary">Start Listening</button>
+      <button id="hangup" class="btn-danger" disabled>Disconnect</button>
+    </div>
+
+    <!-- Chat Interface -->
+    <div class="card chat-card">
+      <div class="transcript-area" id="transcript">
+        <span class="transcript-placeholder">Listening...</span>
+      </div>
+      
+      <div class="chat-input">
+        <input id="text" type="text" placeholder="Type your message..." />
+        <button id="send" class="btn-send" disabled>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Conversation History -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Conversation</h2>
+        <div class="token-stats">
+          <span id="totIn">0</span>
+          <span class="token-divider">/</span>
+          <span id="totOut">0</span>
+          <span class="token-label">tokens</span>
+        </div>
+      </div>
+      <div class="exchanges" id="exchanges"></div>
+    </div>
+
+    <!-- Debug -->
+    <details class="debug-section">
+      <summary>Debug Console</summary>
+      <div id="log" class="debug-log"></div>
+    </details>
+  </div>
 
   <!-- JavaScript Modules -->
   <script src="utils.js"></script>
   <script src="storage.js"></script>
   <script src="ui.js"></script>
+  <script src="audio-monitor.js"></script>
+  <script src="tts-provider.js"></script>
   <script src="speech.js"></script>
   <script src="webrtc.js"></script>
   <script src="app.js"></script>

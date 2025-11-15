@@ -42,18 +42,18 @@ const UI = (function() {
     row.appendChild(tok);
     
     const exWrap = $("exchanges");
-    exWrap.appendChild(row);
+    exWrap.prepend(row);
     exWrap.scrollTop = exWrap.scrollHeight;
     
     totalIn += inS;
     totalOut += outS;
     $("totIn").textContent = "In: " + totalIn;
     $("totOut").textContent = "Out: " + totalOut;
-    $("totAll").textContent = "Total: " + (totalIn + totalOut);
+    // $("totAll").textContent = "Total: " + (totalIn + totalOut);
   };
 
   const updateRateLimit = (limit) => {
-    $("rate").textContent = `Rate remaining: ${limit.remaining}/${limit.limit}`;
+    // $("rate").textContent = `Rate remaining: ${limit.remaining}/${limit.limit}`;
   };
 
   const setTranscript = (text, state) => {
