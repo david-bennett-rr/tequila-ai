@@ -36,6 +36,30 @@ const Storage = (function() {
         },
         set ttsProvider(v) {
             localStorage.setItem("TTS_PROVIDER", v);
+        },
+        get localTtsEndpoint() {
+            return localStorage.getItem("LOCAL_TTS_ENDPOINT") || "";
+        },
+        set localTtsEndpoint(v) {
+            localStorage.setItem("LOCAL_TTS_ENDPOINT", v);
+        },
+        get llmProvider() {
+            return localStorage.getItem("LLM_PROVIDER") || "openai";
+        },
+        set llmProvider(v) {
+            localStorage.setItem("LLM_PROVIDER", v);
+        },
+        get localLlmEndpoint() {
+            return localStorage.getItem("LOCAL_LLM_ENDPOINT") || "";
+        },
+        set localLlmEndpoint(v) {
+            localStorage.setItem("LOCAL_LLM_ENDPOINT", v);
+        },
+        get localLlmModel() {
+            return localStorage.getItem("LOCAL_LLM_MODEL") || "llama2";
+        },
+        set localLlmModel(v) {
+            localStorage.setItem("LOCAL_LLM_MODEL", v);
         }
     };
 
