@@ -1,4 +1,35 @@
 // Main App Module - Application initialization
+
+// Global error handlers for kiosk reliability - catch all errors to prevent crashes
+window.onerror = (msg, url, line, col) => {
+    console.error("[global] Uncaught error:", msg, "at", url, line, col);
+    if (typeof UI !== 'undefined' && UI.log) {
+        UI.log("[err] " + msg);
+    }
+    // Return true to prevent the error from stopping execution
+    return true;
+};
+
+window.onunhandledrejection = (event) => {
+    console.error("[global] Unhandled promise rejection:", event.reason);
+    if (typeof UI !== 'undefined' && UI.log) {
+        UI.log("[err] promise: " + (event.reason?.message || event.reason));
+    }
+    // Prevent the rejection from stopping execution
+    event.preventDefault();
+};
+
+// Handle page visibility changes (kiosk may sleep/wake)
+document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+        console.log("[global] Page became visible, checking connections...");
+        if (typeof UI !== 'undefined' && UI.log) {
+            UI.log("[sys] page visible, checking status...");
+        }
+        // The WebRTC connection monitor will handle reconnection if needed
+    }
+});
+
 const App = (function() {
     const { $ } = Utils;
 

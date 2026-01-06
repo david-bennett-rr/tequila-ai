@@ -5,6 +5,57 @@ const WebRTC = (function() {
     let localLlmConnected = false;
     const textBuf = Object.create(null);
 
+    // Kiosk mode: auto-reconnect on connection loss
+    let shouldBeConnected = false;
+    let reconnectAttempts = 0;
+    let reconnectTimer = null;
+    let connectionMonitorInterval = null;
+    const MAX_RECONNECT_DELAY = 30000;  // Max 30 seconds between retries
+    const BASE_RECONNECT_DELAY = 2000;  // Start with 2 seconds
+
+    const getReconnectDelay = () => {
+        return Math.min(BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+    };
+
+    const scheduleReconnect = () => {
+        if (!shouldBeConnected || reconnectTimer) return;
+
+        const delay = getReconnectDelay();
+        reconnectAttempts++;
+        UI.log("[sys] scheduling reconnect in " + delay + "ms (attempt " + reconnectAttempts + ")");
+        UI.toast("reconnecting...");
+
+        reconnectTimer = setTimeout(async () => {
+            reconnectTimer = null;
+            if (shouldBeConnected && !isConnected()) {
+                UI.log("[sys] attempting reconnect...");
+                try {
+                    await connect();
+                } catch (e) {
+                    UI.log("[sys] reconnect failed: " + e.message);
+                    scheduleReconnect();
+                }
+            }
+        }, delay);
+    };
+
+    const startConnectionMonitor = () => {
+        stopConnectionMonitor();
+        connectionMonitorInterval = setInterval(() => {
+            if (shouldBeConnected && !isConnected()) {
+                UI.log("[sys] connection monitor: connection lost, triggering reconnect");
+                scheduleReconnect();
+            }
+        }, 5000);  // Check every 5 seconds
+    };
+
+    const stopConnectionMonitor = () => {
+        if (connectionMonitorInterval) {
+            clearInterval(connectionMonitorInterval);
+            connectionMonitorInterval = null;
+        }
+    };
+
     const isConnected = () => {
         return localLlmConnected || (dataChannel && dataChannel.readyState === "open");
     };
@@ -63,38 +114,75 @@ const WebRTC = (function() {
 
     const connect = async () => {
         const llmProvider = Storage.llmProvider;
-        const localLlmEndpoint = Storage.localLlmEndpoint.trim() || "http://localhost:11434/api/generate";
         const API_KEY = Storage.apiKey.trim();
         const MODEL = Storage.model.trim();
         const VOICE = Storage.voice;
-        
+
+        // Mark that we want to stay connected (for kiosk auto-reconnect)
+        shouldBeConnected = true;
+
         if (llmProvider === "local") {
             UI.setControls(false);
             UI.toast("connecting to local LLM…");
             // Simulate connection for local LLM (no WebRTC)
             localLlmConnected = true;
+            reconnectAttempts = 0;
             UI.setControls("connected");
             UI.toast("connected (local LLM)");
             UI.log("[sys] connected to local LLM");
+            startConnectionMonitor();
             Speech.init();
             return;
         }
 
         if (!API_KEY) {
             UI.toast("Missing API key");
+            shouldBeConnected = false;
             return;
         }
 
         UI.setControls(false);
         UI.toast("connecting…");
 
-        pc = new RTCPeerConnection({ 
-            iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] 
+        pc = new RTCPeerConnection({
+            iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }]
         });
+
+        // Monitor RTCPeerConnection state for kiosk reliability
+        pc.onconnectionstatechange = () => {
+            UI.log("[rtc] connection state: " + pc.connectionState);
+            if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+                UI.log("[rtc] connection lost, scheduling reconnect");
+                if (shouldBeConnected) {
+                    // Clean up current connection before reconnecting
+                    try { dataChannel?.close(); } catch {}
+                    try { pc?.close(); } catch {}
+                    pc = null;
+                    dataChannel = null;
+                    scheduleReconnect();
+                }
+            } else if (pc.connectionState === "connected") {
+                reconnectAttempts = 0;  // Reset on successful connection
+            }
+        };
+
+        pc.oniceconnectionstatechange = () => {
+            UI.log("[rtc] ICE state: " + pc.iceConnectionState);
+            if (pc.iceConnectionState === "failed") {
+                UI.log("[rtc] ICE failed, scheduling reconnect");
+                if (shouldBeConnected) {
+                    try { dataChannel?.close(); } catch {}
+                    try { pc?.close(); } catch {}
+                    pc = null;
+                    dataChannel = null;
+                    scheduleReconnect();
+                }
+            }
+        };
 
         remoteAudio = new Audio();
         remoteAudio.autoplay = true;
-        
+
         pc.ontrack = (e) => {
             const [stream] = e.streams;
             remoteAudio.srcObject = stream;
@@ -103,9 +191,25 @@ const WebRTC = (function() {
         };
 
         dataChannel = pc.createDataChannel("oai-events");
-        dataChannel.onopen = () => UI.log("[dc] open");
-        dataChannel.onclose = () => UI.log("[dc] close");
-        dataChannel.onerror = (e) => UI.log("[dc] error " + (e?.message || e));
+        dataChannel.onopen = () => {
+            UI.log("[dc] open");
+            reconnectAttempts = 0;  // Reset on successful connection
+        };
+        dataChannel.onclose = () => {
+            UI.log("[dc] close");
+            // Trigger reconnect if we should still be connected
+            if (shouldBeConnected) {
+                UI.log("[dc] unexpected close, scheduling reconnect");
+                scheduleReconnect();
+            }
+        };
+        dataChannel.onerror = (e) => {
+            UI.log("[dc] error " + (e?.message || e));
+            // Trigger reconnect on error
+            if (shouldBeConnected) {
+                scheduleReconnect();
+            }
+        };
         dataChannel.onmessage = handleMessage;
 
         const offer = await pc.createOffer({ 
@@ -129,10 +233,14 @@ const WebRTC = (function() {
             })
         });
 
-        if (!createSession.ok) { 
-            UI.log("[err] session: " + (await createSession.text())); 
-            UI.toast("session failed"); 
-            return; 
+        if (!createSession.ok) {
+            UI.log("[err] session: " + (await createSession.text()));
+            UI.toast("session failed");
+            // Trigger reconnect on session failure
+            if (shouldBeConnected) {
+                scheduleReconnect();
+            }
+            return;
         }
 
         const { client_secret } = await createSession.json();
@@ -148,10 +256,14 @@ const WebRTC = (function() {
             body: offer.sdp
         });
 
-        if (!sdpRes.ok) { 
-            UI.log("[err] sdp: " + (await sdpRes.text())); 
-            UI.toast("SDP failed"); 
-            return; 
+        if (!sdpRes.ok) {
+            UI.log("[err] sdp: " + (await sdpRes.text()));
+            UI.toast("SDP failed");
+            // Trigger reconnect on SDP failure
+            if (shouldBeConnected) {
+                scheduleReconnect();
+            }
+            return;
         }
 
         const answerSdp = await sdpRes.text();
@@ -160,8 +272,24 @@ const WebRTC = (function() {
         UI.setControls("connected");
         UI.toast("connected");
         UI.log("[sys] connected via WebRTC");
-        
+
+        // Start connection monitoring for kiosk mode
+        startConnectionMonitor();
+
         Speech.init();
+    };
+
+    // Wrapper that catches errors and triggers reconnect
+    const connectWithRetry = async () => {
+        try {
+            await connect();
+        } catch (e) {
+            UI.log("[sys] connection error: " + e.message);
+            UI.toast("connection failed");
+            if (shouldBeConnected) {
+                scheduleReconnect();
+            }
+        }
     };
 
     const sendText = (text) => {
@@ -253,6 +381,17 @@ Answer (2 sentences max, no emoji):`;
     };
 
     const hangup = () => {
+        // Mark that we intentionally disconnected (no auto-reconnect)
+        shouldBeConnected = false;
+        reconnectAttempts = 0;
+
+        // Clear any pending reconnect
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+        stopConnectionMonitor();
+
         Speech.stop();
         AudioMonitor.stop();
         TTSProvider.stop();
@@ -269,7 +408,7 @@ Answer (2 sentences max, no emoji):`;
     };
 
     return {
-        connect,
+        connect: connectWithRetry,
         sendText,
         hangup,
         isConnected
