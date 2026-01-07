@@ -4,6 +4,15 @@ const TTSProvider = (function() {
     let elevenLabsAudio = null;
     let browserUtterance = null;
     let chromeResumeHackTimer = null;
+    let currentAudioUrl = null;  // Track current object URL for cleanup
+
+    // Revoke current audio URL if one exists
+    const revokeCurrentAudioUrl = () => {
+        if (currentAudioUrl) {
+            URL.revokeObjectURL(currentAudioUrl);
+            currentAudioUrl = null;
+        }
+    };
 
     // Helper to emit TTS events
     const emitTTSStarted = (provider) => {
@@ -121,6 +130,7 @@ const TTSProvider = (function() {
     const speakWithElevenLabs = async (text) => {
         const apiKey = Storage.elevenLabsKey.trim();
         const voiceId = Storage.elevenLabsVoice.trim() || "21m00Tcm4TlvDq8ikWAM";
+        let audioUrl = null;  // Track URL for this specific call
 
         if (!apiKey) {
             UI.log("[elevenlabs] missing API key");
@@ -128,6 +138,8 @@ const TTSProvider = (function() {
             return;
         }
 
+        // Clean up any previous audio URL
+        revokeCurrentAudioUrl();
         stopTTSWatchdogs();
 
         try {
@@ -137,6 +149,7 @@ const TTSProvider = (function() {
 
             // Start TTS timeout watchdog
             Watchdog.startTTSTimeout(() => {
+                revokeCurrentAudioUrl();
                 if (elevenLabsAudio) {
                     elevenLabsAudio.pause();
                 }
@@ -165,7 +178,8 @@ const TTSProvider = (function() {
             }
 
             const audioBlob = await response.blob();
-            const audioUrl = URL.createObjectURL(audioBlob);
+            audioUrl = URL.createObjectURL(audioBlob);
+            currentAudioUrl = audioUrl;
 
             if (!elevenLabsAudio) {
                 elevenLabsAudio = new Audio();
@@ -173,23 +187,44 @@ const TTSProvider = (function() {
 
             elevenLabsAudio.src = audioUrl;
             elevenLabsAudio.onended = () => {
-                URL.revokeObjectURL(audioUrl);
+                // Only revoke if this is still the current URL (not replaced by new request)
+                if (currentAudioUrl === audioUrl) {
+                    revokeCurrentAudioUrl();
+                } else {
+                    URL.revokeObjectURL(audioUrl);
+                }
                 handleTTSComplete('elevenlabs');
             };
             elevenLabsAudio.onerror = (e) => {
-                URL.revokeObjectURL(audioUrl);
+                if (currentAudioUrl === audioUrl) {
+                    revokeCurrentAudioUrl();
+                } else {
+                    URL.revokeObjectURL(audioUrl);
+                }
                 handleTTSError('elevenlabs', e?.message || 'playback error');
             };
 
             await elevenLabsAudio.play();
             UI.log("[elevenlabs] playing audio");
         } catch (e) {
+            // Clean up this call's URL if it was created
+            if (audioUrl) {
+                if (currentAudioUrl === audioUrl) {
+                    revokeCurrentAudioUrl();
+                } else {
+                    URL.revokeObjectURL(audioUrl);
+                }
+            }
             handleTTSError('elevenlabs', e.message);
         }
     };
 
     const speakWithLocalTTS = async (text) => {
         const endpoint = Storage.localTtsEndpoint.trim() || "http://localhost:5002/api/tts";
+        let audioUrl = null;  // Track URL for this specific call
+
+        // Clean up any previous audio URL
+        revokeCurrentAudioUrl();
         stopTTSWatchdogs();
 
         try {
@@ -199,6 +234,7 @@ const TTSProvider = (function() {
 
             // Start TTS timeout watchdog
             Watchdog.startTTSTimeout(() => {
+                revokeCurrentAudioUrl();
                 if (elevenLabsAudio) {
                     elevenLabsAudio.pause();
                 }
@@ -217,7 +253,8 @@ const TTSProvider = (function() {
             }
 
             const audioBlob = await response.blob();
-            const audioUrl = URL.createObjectURL(audioBlob);
+            audioUrl = URL.createObjectURL(audioBlob);
+            currentAudioUrl = audioUrl;
 
             if (!elevenLabsAudio) {
                 elevenLabsAudio = new Audio();
@@ -225,23 +262,41 @@ const TTSProvider = (function() {
 
             elevenLabsAudio.src = audioUrl;
             elevenLabsAudio.onended = () => {
-                URL.revokeObjectURL(audioUrl);
+                // Only revoke if this is still the current URL (not replaced by new request)
+                if (currentAudioUrl === audioUrl) {
+                    revokeCurrentAudioUrl();
+                } else {
+                    URL.revokeObjectURL(audioUrl);
+                }
                 handleTTSComplete('local');
             };
             elevenLabsAudio.onerror = (e) => {
-                URL.revokeObjectURL(audioUrl);
+                if (currentAudioUrl === audioUrl) {
+                    revokeCurrentAudioUrl();
+                } else {
+                    URL.revokeObjectURL(audioUrl);
+                }
                 handleTTSError('local', e?.message || 'playback error');
             };
 
             await elevenLabsAudio.play();
             UI.log("[local-tts] playing audio");
         } catch (e) {
+            // Clean up this call's URL if it was created
+            if (audioUrl) {
+                if (currentAudioUrl === audioUrl) {
+                    revokeCurrentAudioUrl();
+                } else {
+                    URL.revokeObjectURL(audioUrl);
+                }
+            }
             handleTTSError('local', e.message);
         }
     };
 
     const stop = () => {
         stopTTSWatchdogs();
+        revokeCurrentAudioUrl();
         if (elevenLabsAudio) {
             elevenLabsAudio.pause();
             elevenLabsAudio = null;
