@@ -1,3 +1,5 @@
+// WebRTC Module - OpenAI Realtime API connection
+// Uses: Config, Events, AppState, Watchdog
 const WebRTC = (function() {
     let pc = null;
     let dataChannel = null;
@@ -5,69 +7,70 @@ const WebRTC = (function() {
     let localLlmConnected = false;
     const textBuf = Object.create(null);
 
-    // Kiosk mode: auto-reconnect on connection loss
-    let shouldBeConnected = false;
+    // Reconnect state
     let reconnectAttempts = 0;
     let reconnectTimer = null;
-    let connectionMonitorInterval = null;
-    const MAX_RECONNECT_DELAY = 30000;  // Max 30 seconds between retries
-    const BASE_RECONNECT_DELAY = 2000;  // Start with 2 seconds
 
     const getReconnectDelay = () => {
-        return Math.min(BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+        return Math.min(Config.BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts), Config.MAX_RECONNECT_DELAY);
     };
 
     const scheduleReconnect = () => {
-        if (!shouldBeConnected || reconnectTimer) return;
+        if (!AppState.getFlag('shouldBeConnected') || reconnectTimer) return;
+
+        // Check if we've exceeded max reconnect attempts - trigger page reload as last resort
+        if (reconnectAttempts >= Config.MAX_RECONNECT_ATTEMPTS) {
+            UI.log("[sys] CRITICAL: max reconnect attempts (" + Config.MAX_RECONNECT_ATTEMPTS + ") exceeded");
+            UI.log("[sys] triggering page reload in " + Config.PAGE_RELOAD_DELAY + "ms");
+            UI.toast("reloading page...");
+            Events.emit(Events.EVENTS.ERROR, { source: 'webrtc', error: 'max reconnect attempts exceeded', fatal: true });
+            setTimeout(() => {
+                window.location.reload();
+            }, Config.PAGE_RELOAD_DELAY);
+            return;
+        }
 
         const delay = getReconnectDelay();
         reconnectAttempts++;
-        UI.log("[sys] scheduling reconnect in " + delay + "ms (attempt " + reconnectAttempts + ")");
+        UI.log("[sys] scheduling reconnect in " + delay + "ms (attempt " + reconnectAttempts + "/" + Config.MAX_RECONNECT_ATTEMPTS + ")");
         UI.toast("reconnecting...");
+
+        AppState.transition(AppState.STATES.RECONNECTING, 'scheduling reconnect');
+        Events.emit(Events.EVENTS.RECONNECT_SCHEDULED, { attempt: reconnectAttempts, delay: delay });
 
         reconnectTimer = setTimeout(async () => {
             reconnectTimer = null;
-            if (shouldBeConnected && !isConnected()) {
+            if (AppState.getFlag('shouldBeConnected') && !isConnected()) {
                 UI.log("[sys] attempting reconnect...");
                 try {
                     await connect();
                 } catch (e) {
                     UI.log("[sys] reconnect failed: " + e.message);
+                    Events.emit(Events.EVENTS.CONNECTION_FAILED, { error: e.message, attempt: reconnectAttempts });
                     scheduleReconnect();
                 }
             }
         }, delay);
     };
 
-    const startConnectionMonitor = () => {
-        stopConnectionMonitor();
-        connectionMonitorInterval = setInterval(() => {
-            if (shouldBeConnected && !isConnected()) {
-                UI.log("[sys] connection monitor: connection lost, triggering reconnect");
-                scheduleReconnect();
-            }
-        }, 5000);  // Check every 5 seconds
-    };
-
-    const stopConnectionMonitor = () => {
-        if (connectionMonitorInterval) {
-            clearInterval(connectionMonitorInterval);
-            connectionMonitorInterval = null;
-        }
-    };
-
     const isConnected = () => {
-        return localLlmConnected || (dataChannel && dataChannel.readyState === "open");
+        // For WebRTC: check dataChannel is actually open
+        if (dataChannel && dataChannel.readyState === "open") {
+            return true;
+        }
+        // For local LLM: just check the flag (we'll verify with actual requests)
+        // Note: local LLM health is verified on each request, not via persistent connection
+        return localLlmConnected;
     };
 
     const handleMessage = (e) => {
         let msg;
-        try { 
-            msg = JSON.parse(e.data); 
-        } catch { 
-            return; 
+        try {
+            msg = JSON.parse(e.data);
+        } catch {
+            return;
         }
-        
+
         const t = msg.type;
 
         if (t === "response.content_part.done") {
@@ -97,7 +100,9 @@ const WebRTC = (function() {
 
             if (assistantText) UI.log("[assistant] " + assistantText);
             UI.addExchange("assistant", assistantText, inTok, outTok);
-            
+
+            Events.emit(Events.EVENTS.ASSISTANT_RESPONSE, { text: assistantText, inTok, outTok });
+
             // Use ElevenLabs if selected
             if (TTSProvider.shouldUseSpeech()) {
                 const provider = TTSProvider.getProvider();
@@ -107,9 +112,16 @@ const WebRTC = (function() {
                     TTSProvider.speakWithLocalTTS(assistantText);
                 }
             }
-            
+
             UI.log("[audio] response.done received");
         }
+    };
+
+    const cleanupConnection = () => {
+        try { dataChannel?.close(); } catch {}
+        try { pc?.close(); } catch {}
+        pc = null;
+        dataChannel = null;
     };
 
     const connect = async () => {
@@ -119,7 +131,16 @@ const WebRTC = (function() {
         const VOICE = Storage.voice;
 
         // Mark that we want to stay connected (for kiosk auto-reconnect)
-        shouldBeConnected = true;
+        AppState.setFlag('shouldBeConnected', true);
+
+        Events.emit(Events.EVENTS.CONNECTION_REQUESTED);
+        // Transition to CONNECTING - may come from IDLE, RECONNECTING, or ERROR
+        // If already CONNECTING, this is a no-op (returns true for same state)
+        if (!AppState.transition(AppState.STATES.CONNECTING, 'connect requested')) {
+            // If transition failed, force it for recovery (kiosk reliability)
+            UI.log("[sys] forcing CONNECTING state for recovery");
+            AppState.forceState(AppState.STATES.CONNECTING, 'forced for recovery');
+        }
 
         if (llmProvider === "local") {
             UI.setControls(false);
@@ -130,14 +151,22 @@ const WebRTC = (function() {
             UI.setControls("connected");
             UI.toast("connected (local LLM)");
             UI.log("[sys] connected to local LLM");
-            startConnectionMonitor();
+
+            AppState.transition(AppState.STATES.CONNECTED, 'local LLM connected');
+            Events.emit(Events.EVENTS.CONNECTION_ESTABLISHED, { provider: 'local' });
+
+            // Start connection monitoring using Watchdog
+            Watchdog.startConnectionMonitor(scheduleReconnect);
+
             Speech.init();
             return;
         }
 
         if (!API_KEY) {
             UI.toast("Missing API key");
-            shouldBeConnected = false;
+            AppState.setFlag('shouldBeConnected', false);
+            AppState.transition(AppState.STATES.IDLE, 'missing API key');
+            Events.emit(Events.EVENTS.CONNECTION_FAILED, { error: 'missing API key' });
             return;
         }
 
@@ -153,12 +182,10 @@ const WebRTC = (function() {
             UI.log("[rtc] connection state: " + pc.connectionState);
             if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
                 UI.log("[rtc] connection lost, scheduling reconnect");
-                if (shouldBeConnected) {
-                    // Clean up current connection before reconnecting
-                    try { dataChannel?.close(); } catch {}
-                    try { pc?.close(); } catch {}
-                    pc = null;
-                    dataChannel = null;
+                Events.emit(Events.EVENTS.CONNECTION_LOST, { state: pc.connectionState });
+
+                if (AppState.getFlag('shouldBeConnected')) {
+                    cleanupConnection();
                     scheduleReconnect();
                 }
             } else if (pc.connectionState === "connected") {
@@ -170,11 +197,10 @@ const WebRTC = (function() {
             UI.log("[rtc] ICE state: " + pc.iceConnectionState);
             if (pc.iceConnectionState === "failed") {
                 UI.log("[rtc] ICE failed, scheduling reconnect");
-                if (shouldBeConnected) {
-                    try { dataChannel?.close(); } catch {}
-                    try { pc?.close(); } catch {}
-                    pc = null;
-                    dataChannel = null;
+                Events.emit(Events.EVENTS.CONNECTION_LOST, { state: 'ice-failed' });
+
+                if (AppState.getFlag('shouldBeConnected')) {
+                    cleanupConnection();
                     scheduleReconnect();
                 }
             }
@@ -198,23 +224,25 @@ const WebRTC = (function() {
         dataChannel.onclose = () => {
             UI.log("[dc] close");
             // Trigger reconnect if we should still be connected
-            if (shouldBeConnected) {
+            if (AppState.getFlag('shouldBeConnected')) {
                 UI.log("[dc] unexpected close, scheduling reconnect");
+                Events.emit(Events.EVENTS.CONNECTION_LOST, { reason: 'datachannel-close' });
                 scheduleReconnect();
             }
         };
         dataChannel.onerror = (e) => {
             UI.log("[dc] error " + (e?.message || e));
+            Events.emit(Events.EVENTS.ERROR, { source: 'datachannel', error: e?.message || e });
             // Trigger reconnect on error
-            if (shouldBeConnected) {
+            if (AppState.getFlag('shouldBeConnected')) {
                 scheduleReconnect();
             }
         };
         dataChannel.onmessage = handleMessage;
 
-        const offer = await pc.createOffer({ 
+        const offer = await pc.createOffer({
             offerToReceiveAudio: true,
-            offerToReceiveVideo: false 
+            offerToReceiveVideo: false
         });
         await pc.setLocalDescription(offer);
 
@@ -236,8 +264,9 @@ const WebRTC = (function() {
         if (!createSession.ok) {
             UI.log("[err] session: " + (await createSession.text()));
             UI.toast("session failed");
+            Events.emit(Events.EVENTS.CONNECTION_FAILED, { error: 'session creation failed' });
             // Trigger reconnect on session failure
-            if (shouldBeConnected) {
+            if (AppState.getFlag('shouldBeConnected')) {
                 scheduleReconnect();
             }
             return;
@@ -248,10 +277,10 @@ const WebRTC = (function() {
 
         const sdpRes = await fetch("https://api.openai.com/v1/realtime?model=" + encodeURIComponent(MODEL), {
             method: "POST",
-            headers: { 
-                Authorization: "Bearer " + token, 
-                "Content-Type": "application/sdp", 
-                "OpenAI-Beta": "realtime=v1" 
+            headers: {
+                Authorization: "Bearer " + token,
+                "Content-Type": "application/sdp",
+                "OpenAI-Beta": "realtime=v1"
             },
             body: offer.sdp
         });
@@ -259,8 +288,9 @@ const WebRTC = (function() {
         if (!sdpRes.ok) {
             UI.log("[err] sdp: " + (await sdpRes.text()));
             UI.toast("SDP failed");
+            Events.emit(Events.EVENTS.CONNECTION_FAILED, { error: 'SDP exchange failed' });
             // Trigger reconnect on SDP failure
-            if (shouldBeConnected) {
+            if (AppState.getFlag('shouldBeConnected')) {
                 scheduleReconnect();
             }
             return;
@@ -273,8 +303,11 @@ const WebRTC = (function() {
         UI.toast("connected");
         UI.log("[sys] connected via WebRTC");
 
-        // Start connection monitoring for kiosk mode
-        startConnectionMonitor();
+        AppState.transition(AppState.STATES.CONNECTED, 'WebRTC connected');
+        Events.emit(Events.EVENTS.CONNECTION_ESTABLISHED, { provider: 'openai' });
+
+        // Start connection monitoring using Watchdog
+        Watchdog.startConnectionMonitor(scheduleReconnect);
 
         Speech.init();
     };
@@ -286,7 +319,9 @@ const WebRTC = (function() {
         } catch (e) {
             UI.log("[sys] connection error: " + e.message);
             UI.toast("connection failed");
-            if (shouldBeConnected) {
+            Events.emit(Events.EVENTS.CONNECTION_FAILED, { error: e.message });
+            AppState.transition(AppState.STATES.ERROR, 'connection error');
+            if (AppState.getFlag('shouldBeConnected')) {
                 scheduleReconnect();
             }
         }
@@ -297,24 +332,39 @@ const WebRTC = (function() {
         const llmProvider = Storage.llmProvider;
         const localLlmEndpoint = Storage.localLlmEndpoint.trim() || "http://localhost:11434/api/generate";
         const modalities = TTSProvider.shouldUseOpenAIAudio() ? ["audio", "text"] : ["text"];
-        const finalPrompt = `STRICT RULES - FOLLOW EXACTLY:
-1. MAX 2 sentences. Never more.
-2. ZERO emojis. Never use any emoji.
-3. NO asterisks, NO *actions*, NO roleplay.
-4. Plain text only. Direct answers.
-5. Only discuss Jose Cuervo tequila.
-6. Reply in same language as user.
+        // Use chat format for instruct models, simpler format for base models
+        const isInstructModel = (Storage.localLlmModel || "").toLowerCase().includes("instruct") ||
+                                (Storage.localLlmModel || "").toLowerCase().includes("chat") ||
+                                (Storage.localLlmModel || "").toLowerCase().includes("qwen") ||
+                                (Storage.localLlmModel || "").toLowerCase().includes("dolphin") ||
+                                (Storage.localLlmModel || "").toLowerCase().includes("mistral");
+
+        const finalPrompt = isInstructModel
+            ? `You're a friendly bartender at a Jose Cuervo tasting. Chat naturally, keep it brief.
+
+Rules: 1 sentence max. No emojis. Be casual and warm.
 
 Background: ${Summary.summary}
 
-Question: ${text}
+Guest: ${text}
+You:`
+            : `[Bartender gives a quick, friendly one-liner]
 
-Answer (2 sentences max, no emoji):`;
+Guest: ${text}
+Bartender:`;
         if (llmProvider === "local") {
             // Send to local LLM endpoint (Ollama format)
             UI.log("[you] " + text);
             UI.addExchange("user", text, 0, 0);
             UI.log("[local-llm] sending to " + localLlmEndpoint);
+            UI.log("[local-llm] model: " + (Storage.localLlmModel || "llama2") + " - waiting for response...");
+            UI.setTranscript("Thinking...", "waiting");
+
+            const startTime = Date.now();
+
+            // Use AbortController for timeout (2 minutes for large models)
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 120000);
 
             fetch(localLlmEndpoint, {
                 method: "POST",
@@ -323,9 +373,13 @@ Answer (2 sentences max, no emoji):`;
                     model: Storage.localLlmModel || "llama2",
                     prompt: finalPrompt,
                     stream: false
-                })
+                }),
+                signal: controller.signal
             })
             .then(res => {
+                clearTimeout(timeoutId);
+                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                UI.log("[local-llm] response received in " + elapsed + "s");
                 if (!res.ok) {
                     throw new Error("HTTP " + res.status);
                 }
@@ -336,10 +390,14 @@ Answer (2 sentences max, no emoji):`;
                 const assistantText = data.response || data.text || data.content || "";
                 if (!assistantText) {
                     UI.log("[local-llm] empty response: " + JSON.stringify(data));
+                    UI.setTranscript("Listening...", "listening");
                     return;
                 }
                 UI.log("[assistant] " + assistantText);
                 UI.addExchange("assistant", assistantText, 0, 0);
+
+                Events.emit(Events.EVENTS.ASSISTANT_RESPONSE, { text: assistantText, inTok: 0, outTok: 0 });
+
                 if (TTSProvider.shouldUseSpeech()) {
                     const provider = TTSProvider.getProvider();
                     if (provider === "elevenlabs" && assistantText) {
@@ -349,24 +407,45 @@ Answer (2 sentences max, no emoji):`;
                     } else if (provider === "local" && assistantText) {
                         TTSProvider.speakWithLocalTTS(assistantText);
                     }
+                } else {
+                    // No TTS - go back to listening
+                    UI.setTranscript("Listening...", "listening");
                 }
             })
             .catch(e => {
-                UI.log("[local-llm] error: " + e.message);
-                if (e.message === "Failed to fetch") {
-                    UI.log("[local-llm] Hint: Is Ollama running? Try: OLLAMA_ORIGINS=* ollama serve");
+                clearTimeout(timeoutId);
+                if (e.name === 'AbortError') {
+                    UI.log("[local-llm] TIMEOUT: model took too long (>2min). Try a smaller model.");
+                    UI.toast("LLM timeout - try smaller model");
+                } else {
+                    UI.log("[local-llm] error: " + e.message);
+                    if (e.message === "Failed to fetch") {
+                        UI.log("[local-llm] Hint: Is Ollama running? Try: OLLAMA_ORIGINS=* ollama serve");
+                    }
                 }
+                Events.emit(Events.EVENTS.ERROR, { source: 'local-llm', error: e.message });
+                UI.setTranscript("Listening...", "listening");
             });
             return;
         }
 
+        // OpenAI uses its own prompt (always instruct-capable)
+        const openaiPrompt = `You're a friendly bartender at a Jose Cuervo tasting. Chat naturally, keep it brief.
+
+Rules: 1 sentence max. No emojis. Be casual and warm.
+
+Background: ${Summary.summary}
+
+Guest: ${text}
+You:`;
+
         const messages = [
             {
                 type: "conversation.item.create",
-                item: { 
-                    type: "message", 
-                    role: "user", 
-                    content: [{ type: "input_text", text: finalPrompt }] 
+                item: {
+                    type: "message",
+                    role: "user",
+                    content: [{ type: "input_text", text: openaiPrompt }]
                 }
             },
             {
@@ -382,7 +461,7 @@ Answer (2 sentences max, no emoji):`;
 
     const hangup = () => {
         // Mark that we intentionally disconnected (no auto-reconnect)
-        shouldBeConnected = false;
+        AppState.setFlag('shouldBeConnected', false);
         reconnectAttempts = 0;
 
         // Clear any pending reconnect
@@ -390,18 +469,21 @@ Answer (2 sentences max, no emoji):`;
             clearTimeout(reconnectTimer);
             reconnectTimer = null;
         }
-        stopConnectionMonitor();
+
+        // Stop connection monitor watchdog
+        Watchdog.stop(Watchdog.NAMES.CONNECTION_MONITOR);
 
         Speech.stop();
         AudioMonitor.stop();
         TTSProvider.stop();
 
-        try { dataChannel?.close(); } catch {}
-        try { pc?.close(); } catch {}
-        pc = null;
-        dataChannel = null;
+        cleanupConnection();
         remoteAudio = null;
         localLlmConnected = false;
+
+        AppState.transition(AppState.STATES.IDLE, 'user hangup');
+        Events.emit(Events.EVENTS.DISCONNECTED);
+
         UI.setControls("idle");
         UI.toast("idle");
         UI.log("[sys] disconnected");

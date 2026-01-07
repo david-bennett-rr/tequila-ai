@@ -1,17 +1,23 @@
+// AudioMonitor Module - Audio level monitoring for voice activity detection
+// Uses: Config, Events, AppState, Watchdog
+// Note: This module only controls assistantSpeaking when using OpenAI audio (WebRTC)
+// For other TTS providers (ElevenLabs, Browser, Local), TTSProvider handles the state
 const AudioMonitor = (function() {
     let audioContext = null;
     let analyser = null;
     let source = null;
     let checkInterval = null;
     let silenceStartTime = 0;
-    let speakingStartTime = 0;      // Track when speaking started
     let lastStream = null;          // Store stream for recovery
-    const SILENCE_THRESHOLD = 500;
-    const MAX_SPEAKING_DURATION = 120000;  // 2 minutes max speaking time failsafe
+    let isOpenAIAudio = false;      // Track if we should control speaking state
 
     const setup = (stream) => {
         // Store stream for potential recovery
         lastStream = stream;
+
+        // Check if we're using OpenAI audio - only then should AudioMonitor control speaking state
+        // For other TTS providers, they handle their own speaking state
+        isOpenAIAudio = typeof TTSProvider !== 'undefined' && TTSProvider.shouldUseOpenAIAudio();
 
         try {
             // Clean up any existing context first
@@ -32,6 +38,7 @@ const AudioMonitor = (function() {
                     UI.log("[audio] context suspended, attempting resume");
                     audioContext.resume().catch(e => {
                         UI.log("[audio] resume failed: " + e.message);
+                        Events.emit(Events.EVENTS.ERROR, { source: 'audio-context', error: e.message });
                     });
                 }
             };
@@ -40,6 +47,7 @@ const AudioMonitor = (function() {
             UI.log("[audio] analyser setup complete");
         } catch (e) {
             UI.log("[audio] analyser setup failed: " + e.message);
+            Events.emit(Events.EVENTS.ERROR, { source: 'audio-monitor', error: e.message });
             // Attempt recovery after delay
             setTimeout(() => {
                 if (lastStream && lastStream.active) {
@@ -74,13 +82,26 @@ const AudioMonitor = (function() {
             try {
                 analyser.getByteFrequencyData(dataArray);
                 const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-                const isPlaying = average > 5;
+                const isPlaying = average > Config.AUDIO_LEVEL_THRESHOLD;
 
                 if (isPlaying && !wasPlaying) {
                     wasPlaying = true;
                     silenceStartTime = 0;
-                    speakingStartTime = Date.now();
-                    if (!Speech.assistantSpeaking) {
+
+                    // Start speaking timeout watchdog (always, as failsafe)
+                    Watchdog.startSpeakingTimeout(() => {
+                        UI.log("[audio] failsafe: speaking too long, forcing end");
+                        wasPlaying = false;
+                        silenceStartTime = 0;
+                        Watchdog.stop(Watchdog.NAMES.SPEAKING_TIMEOUT);
+                        if (AppState.getFlag('assistantSpeaking')) {
+                            Speech.setAssistantSpeaking(false);
+                        }
+                    });
+
+                    // Only control speaking state if using OpenAI audio
+                    // For other TTS providers, they handle their own state
+                    if (isOpenAIAudio && !AppState.getFlag('assistantSpeaking')) {
                         Speech.setAssistantSpeaking(true);
                         UI.log("[audio] detected start (level: " + average.toFixed(1) + ")");
                     }
@@ -90,37 +111,30 @@ const AudioMonitor = (function() {
                     }
 
                     const silenceDuration = Date.now() - silenceStartTime;
-                    if (silenceDuration > SILENCE_THRESHOLD) {
+                    if (silenceDuration > Config.AUDIO_SILENCE_THRESHOLD) {
                         wasPlaying = false;
                         silenceStartTime = 0;
-                        speakingStartTime = 0;
-                        if (Speech.assistantSpeaking) {
+
+                        // Stop speaking timeout watchdog
+                        Watchdog.stop(Watchdog.NAMES.SPEAKING_TIMEOUT);
+
+                        // Only control speaking state if using OpenAI audio
+                        if (isOpenAIAudio && AppState.getFlag('assistantSpeaking')) {
                             Speech.setAssistantSpeaking(false);
                             UI.log("[audio] detected end (silence: " + silenceDuration + "ms)");
                         }
                     }
                 }
-
-                // Failsafe: force end speaking if it's been too long (audio stream might be broken)
-                if (wasPlaying && speakingStartTime > 0) {
-                    const speakingDuration = Date.now() - speakingStartTime;
-                    if (speakingDuration > MAX_SPEAKING_DURATION) {
-                        UI.log("[audio] failsafe: speaking too long (" + speakingDuration + "ms), forcing end");
-                        wasPlaying = false;
-                        silenceStartTime = 0;
-                        speakingStartTime = 0;
-                        Speech.setAssistantSpeaking(false);
-                    }
-                }
             } catch (e) {
                 UI.log("[audio] monitor error: " + e.message);
+                Events.emit(Events.EVENTS.ERROR, { source: 'audio-monitor', error: e.message });
                 // Try to recover
                 if (lastStream && lastStream.active) {
                     stop();
                     setTimeout(() => setup(lastStream), 1000);
                 }
             }
-        }, 50);
+        }, Config.AUDIO_MONITOR_INTERVAL);
     };
 
     const stop = () => {
@@ -128,10 +142,10 @@ const AudioMonitor = (function() {
             clearInterval(checkInterval);
             checkInterval = null;
         }
+        Watchdog.stop(Watchdog.NAMES.SPEAKING_TIMEOUT);
         cleanup();
         lastStream = null;
         silenceStartTime = 0;
-        speakingStartTime = 0;
     };
 
     return { setup, stop };

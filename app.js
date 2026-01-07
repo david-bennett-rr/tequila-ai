@@ -1,10 +1,14 @@
 // Main App Module - Application initialization
+// Uses: Config, Events, AppState, Watchdog, all feature modules
 
 // Global error handlers for kiosk reliability - catch all errors to prevent crashes
 window.onerror = (msg, url, line, col) => {
     console.error("[global] Uncaught error:", msg, "at", url, line, col);
     if (typeof UI !== 'undefined' && UI.log) {
         UI.log("[err] " + msg);
+    }
+    if (typeof Events !== 'undefined') {
+        Events.emit(Events.EVENTS.ERROR, { source: 'global', error: msg, url, line, col });
     }
     // Return true to prevent the error from stopping execution
     return true;
@@ -14,6 +18,9 @@ window.onunhandledrejection = (event) => {
     console.error("[global] Unhandled promise rejection:", event.reason);
     if (typeof UI !== 'undefined' && UI.log) {
         UI.log("[err] promise: " + (event.reason?.message || event.reason));
+    }
+    if (typeof Events !== 'undefined') {
+        Events.emit(Events.EVENTS.ERROR, { source: 'promise', error: event.reason?.message || event.reason });
     }
     // Prevent the rejection from stopping execution
     event.preventDefault();
@@ -26,7 +33,7 @@ document.addEventListener("visibilitychange", () => {
         if (typeof UI !== 'undefined' && UI.log) {
             UI.log("[sys] page visible, checking status...");
         }
-        // The WebRTC connection monitor will handle reconnection if needed
+        // The WebRTC connection monitor (via Watchdog) will handle reconnection if needed
     }
 });
 
@@ -141,11 +148,23 @@ const App = (function() {
             });
         }
 
+        // Subscribe to state changes for debugging
+        Events.on(Events.EVENTS.STATE_CHANGED, (data) => {
+            UI.log("[app] state: " + data.from + " -> " + data.to);
+        });
+
+        // Subscribe to errors for centralized error handling
+        Events.on(Events.EVENTS.ERROR, (data) => {
+            console.error("[app] Error from " + data.source + ":", data.error);
+        });
+
         // Initial UI state
         UI.setControls("idle");
         if (Storage.apiKey) {
             UI.toast("ready");
         }
+
+        UI.log("[app] initialized with new module architecture");
     };
 
     return { init };

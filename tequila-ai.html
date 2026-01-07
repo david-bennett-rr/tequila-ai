@@ -221,14 +221,29 @@
   </div>
 
   <!-- JavaScript Modules -->
+  <!-- Core infrastructure (no dependencies) -->
+  <script src="config.js"></script>
+  <script src="events.js"></script>
+
+  <!-- Foundation modules -->
   <script src="tequila-wars-summary.js"></script>
   <script src="utils.js"></script>
   <script src="storage.js"></script>
   <script src="ui.js"></script>
+
+  <!-- State management (needs Events, UI) -->
+  <script src="app-state.js"></script>
+
+  <!-- Watchdog system (needs Config, AppState, UI) -->
+  <script src="watchdog.js"></script>
+
+  <!-- Feature modules (use all above) -->
   <script src="audio-monitor.js"></script>
   <script src="tts-provider.js"></script>
   <script src="speech.js"></script>
   <script src="webrtc.js"></script>
+
+  <!-- Main app initialization -->
   <script src="app.js"></script>
 </body>
 </html>

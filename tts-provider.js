@@ -1,73 +1,61 @@
+// TTSProvider Module - Text-to-Speech providers (Browser, ElevenLabs, Local)
+// Uses: Config, Events, AppState, Watchdog
 const TTSProvider = (function() {
     let elevenLabsAudio = null;
     let browserUtterance = null;
-    let speakingTimeoutTimer = null;
-    const MAX_SPEAKING_DURATION = 60000;  // 60 seconds max for any TTS
+    let chromeResumeHackTimer = null;
 
-    // Failsafe: ensure assistantSpeaking doesn't get stuck forever
-    const startSpeakingTimeout = () => {
-        clearSpeakingTimeout();
-        speakingTimeoutTimer = setTimeout(() => {
-            UI.log("[tts] timeout: assistantSpeaking stuck, forcing reset");
-            Speech.setAssistantSpeaking(false);
-        }, MAX_SPEAKING_DURATION);
+    // Helper to emit TTS events
+    const emitTTSStarted = (provider) => {
+        Events.emit(Events.EVENTS.TTS_STARTED, { provider });
     };
 
-    const clearSpeakingTimeout = () => {
-        if (speakingTimeoutTimer) {
-            clearTimeout(speakingTimeoutTimer);
-            speakingTimeoutTimer = null;
+    const emitTTSEnded = (provider) => {
+        Events.emit(Events.EVENTS.TTS_ENDED, { provider });
+    };
+
+    const emitTTSError = (provider, error) => {
+        Events.emit(Events.EVENTS.TTS_ERROR, { provider, error });
+    };
+
+    // Cleanup helper for TTS timeout watchdog
+    const stopTTSWatchdogs = () => {
+        Watchdog.stop(Watchdog.NAMES.TTS_TIMEOUT);
+        Watchdog.stop(Watchdog.NAMES.BROWSER_TTS);
+        if (chromeResumeHackTimer) {
+            clearInterval(chromeResumeHackTimer);
+            chromeResumeHackTimer = null;
         }
     };
 
-    // Chrome bug workaround: speechSynthesis can get stuck, onend may never fire
-    // This watchdog checks if speech is still playing and forces completion if stuck
-    let browserTTSWatchdog = null;
-    let browserTTSStartTime = 0;
-
-    const startBrowserTTSWatchdog = () => {
-        stopBrowserTTSWatchdog();
-        browserTTSStartTime = Date.now();
-        browserTTSWatchdog = setInterval(() => {
-            // Check if speechSynthesis thinks it's still speaking
-            if (!window.speechSynthesis.speaking && !window.speechSynthesis.pending) {
-                // Speech finished but onend might not have fired (Chrome bug)
-                UI.log("[browser-tts] watchdog: speech ended without event, cleaning up");
-                stopBrowserTTSWatchdog();
-                clearSpeakingTimeout();
-                Speech.setAssistantSpeaking(false);
-            } else if (Date.now() - browserTTSStartTime > MAX_SPEAKING_DURATION) {
-                // Stuck for too long, force cancel
-                UI.log("[browser-tts] watchdog: stuck too long, forcing cancel");
-                window.speechSynthesis.cancel();
-                stopBrowserTTSWatchdog();
-                clearSpeakingTimeout();
-                Speech.setAssistantSpeaking(false);
-            }
-        }, 500);  // Check every 500ms
+    // Handle TTS completion
+    const handleTTSComplete = (provider) => {
+        stopTTSWatchdogs();
+        Speech.setAssistantSpeaking(false);
+        UI.log("[" + provider + "] playback complete");
+        emitTTSEnded(provider);
     };
 
-    const stopBrowserTTSWatchdog = () => {
-        if (browserTTSWatchdog) {
-            clearInterval(browserTTSWatchdog);
-            browserTTSWatchdog = null;
-        }
-        browserTTSStartTime = 0;
+    // Handle TTS error
+    const handleTTSError = (provider, error) => {
+        stopTTSWatchdogs();
+        UI.log("[" + provider + "] error: " + error);
+        Speech.setAssistantSpeaking(false);
+        emitTTSError(provider, error);
     };
 
     const speakWithBrowser = (text) => {
         if (!('speechSynthesis' in window)) {
             UI.log("[browser-tts] not supported");
+            emitTTSError('browser', 'not supported');
             return;
         }
 
         // Cancel any ongoing speech
         window.speechSynthesis.cancel();
-        clearSpeakingTimeout();
-        stopBrowserTTSWatchdog();
+        stopTTSWatchdogs();
 
         // Chrome bug: voices may not be loaded yet
-        // Try to get voices, if empty wait a bit
         let voices = window.speechSynthesis.getVoices();
         if (voices.length === 0) {
             UI.log("[browser-tts] waiting for voices to load...");
@@ -75,8 +63,25 @@ const TTSProvider = (function() {
 
         UI.log("[browser-tts] speaking...");
         Speech.setAssistantSpeaking(true);
-        startSpeakingTimeout();
-        startBrowserTTSWatchdog();
+        emitTTSStarted('browser');
+
+        // Start TTS timeout watchdog
+        Watchdog.startTTSTimeout(() => {
+            window.speechSynthesis.cancel();
+            handleTTSError('browser', 'timeout exceeded');
+        });
+
+        // Start browser TTS watchdog for Chrome bugs
+        Watchdog.startBrowserTTSWatchdog(
+            // onStuck
+            () => {
+                handleTTSError('browser', 'stuck - forced cancel');
+            },
+            // onEnded (speech ended without event)
+            () => {
+                handleTTSComplete('browser');
+            }
+        );
 
         browserUtterance = new SpeechSynthesisUtterance(text);
         browserUtterance.rate = 1.0;
@@ -84,29 +89,30 @@ const TTSProvider = (function() {
 
         // Chrome bug workaround: long utterances get cut off
         // We can help by periodically resuming (in case it pauses)
-        const chromeResumeHack = setInterval(() => {
+        chromeResumeHackTimer = setInterval(() => {
             if (window.speechSynthesis.speaking) {
                 window.speechSynthesis.pause();
                 window.speechSynthesis.resume();
             } else {
-                clearInterval(chromeResumeHack);
+                clearInterval(chromeResumeHackTimer);
+                chromeResumeHackTimer = null;
             }
-        }, 10000);  // Every 10 seconds
+        }, Config.CHROME_RESUME_INTERVAL);
 
         browserUtterance.onend = () => {
-            clearInterval(chromeResumeHack);
-            stopBrowserTTSWatchdog();
-            clearSpeakingTimeout();
-            Speech.setAssistantSpeaking(false);
-            UI.log("[browser-tts] complete");
+            if (chromeResumeHackTimer) {
+                clearInterval(chromeResumeHackTimer);
+                chromeResumeHackTimer = null;
+            }
+            handleTTSComplete('browser');
         };
 
         browserUtterance.onerror = (e) => {
-            clearInterval(chromeResumeHack);
-            stopBrowserTTSWatchdog();
-            clearSpeakingTimeout();
-            UI.log("[browser-tts] error: " + e.error);
-            Speech.setAssistantSpeaking(false);
+            if (chromeResumeHackTimer) {
+                clearInterval(chromeResumeHackTimer);
+                chromeResumeHackTimer = null;
+            }
+            handleTTSError('browser', e.error);
         };
 
         window.speechSynthesis.speak(browserUtterance);
@@ -118,15 +124,24 @@ const TTSProvider = (function() {
 
         if (!apiKey) {
             UI.log("[elevenlabs] missing API key");
+            emitTTSError('elevenlabs', 'missing API key');
             return;
         }
 
-        clearSpeakingTimeout();
+        stopTTSWatchdogs();
 
         try {
             UI.log("[elevenlabs] requesting audio...");
             Speech.setAssistantSpeaking(true);
-            startSpeakingTimeout();
+            emitTTSStarted('elevenlabs');
+
+            // Start TTS timeout watchdog
+            Watchdog.startTTSTimeout(() => {
+                if (elevenLabsAudio) {
+                    elevenLabsAudio.pause();
+                }
+                handleTTSError('elevenlabs', 'timeout exceeded');
+            });
 
             const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
                 method: "POST",
@@ -145,9 +160,7 @@ const TTSProvider = (function() {
             });
 
             if (!response.ok) {
-                clearSpeakingTimeout();
-                UI.log("[elevenlabs] error: " + (await response.text()));
-                Speech.setAssistantSpeaking(false);
+                handleTTSError('elevenlabs', await response.text());
                 return;
             }
 
@@ -160,35 +173,37 @@ const TTSProvider = (function() {
 
             elevenLabsAudio.src = audioUrl;
             elevenLabsAudio.onended = () => {
-                clearSpeakingTimeout();
-                Speech.setAssistantSpeaking(false);
                 URL.revokeObjectURL(audioUrl);
-                UI.log("[elevenlabs] playback complete");
+                handleTTSComplete('elevenlabs');
             };
             elevenLabsAudio.onerror = (e) => {
-                clearSpeakingTimeout();
-                UI.log("[elevenlabs] playback error: " + (e?.message || e));
-                Speech.setAssistantSpeaking(false);
                 URL.revokeObjectURL(audioUrl);
+                handleTTSError('elevenlabs', e?.message || 'playback error');
             };
 
             await elevenLabsAudio.play();
             UI.log("[elevenlabs] playing audio");
         } catch (e) {
-            clearSpeakingTimeout();
-            UI.log("[elevenlabs] error: " + e.message);
-            Speech.setAssistantSpeaking(false);
+            handleTTSError('elevenlabs', e.message);
         }
     };
 
     const speakWithLocalTTS = async (text) => {
         const endpoint = Storage.localTtsEndpoint.trim() || "http://localhost:5002/api/tts";
-        clearSpeakingTimeout();
+        stopTTSWatchdogs();
 
         try {
             UI.log("[local-tts] requesting audio...");
             Speech.setAssistantSpeaking(true);
-            startSpeakingTimeout();
+            emitTTSStarted('local');
+
+            // Start TTS timeout watchdog
+            Watchdog.startTTSTimeout(() => {
+                if (elevenLabsAudio) {
+                    elevenLabsAudio.pause();
+                }
+                handleTTSError('local', 'timeout exceeded');
+            });
 
             const response = await fetch(endpoint, {
                 method: "POST",
@@ -197,41 +212,36 @@ const TTSProvider = (function() {
             });
 
             if (!response.ok) {
-                clearSpeakingTimeout();
-                UI.log("[local-tts] error: " + (await response.text()));
-                Speech.setAssistantSpeaking(false);
+                handleTTSError('local', await response.text());
                 return;
             }
+
             const audioBlob = await response.blob();
             const audioUrl = URL.createObjectURL(audioBlob);
+
             if (!elevenLabsAudio) {
                 elevenLabsAudio = new Audio();
             }
+
             elevenLabsAudio.src = audioUrl;
             elevenLabsAudio.onended = () => {
-                clearSpeakingTimeout();
-                Speech.setAssistantSpeaking(false);
                 URL.revokeObjectURL(audioUrl);
-                UI.log("[local-tts] playback complete");
+                handleTTSComplete('local');
             };
             elevenLabsAudio.onerror = (e) => {
-                clearSpeakingTimeout();
-                UI.log("[local-tts] playback error: " + (e?.message || e));
-                Speech.setAssistantSpeaking(false);
                 URL.revokeObjectURL(audioUrl);
+                handleTTSError('local', e?.message || 'playback error');
             };
+
             await elevenLabsAudio.play();
             UI.log("[local-tts] playing audio");
         } catch (e) {
-            clearSpeakingTimeout();
-            UI.log("[local-tts] error: " + e.message);
-            Speech.setAssistantSpeaking(false);
+            handleTTSError('local', e.message);
         }
     };
 
     const stop = () => {
-        clearSpeakingTimeout();
-        stopBrowserTTSWatchdog();
+        stopTTSWatchdogs();
         if (elevenLabsAudio) {
             elevenLabsAudio.pause();
             elevenLabsAudio = null;
