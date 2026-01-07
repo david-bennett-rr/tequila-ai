@@ -6,6 +6,40 @@ const WebRTC = (function() {
     let remoteAudio = null;
     let localLlmConnected = false;
     const textBuf = Object.create(null);
+    let responseIdCounter = 0;  // Counter for generating unique fallback IDs
+    const fallbackIdMap = Object.create(null);  // Maps missing response_ids to generated fallback IDs
+
+    // Get or create a consistent ID for a response
+    // This ensures content_part.done and response.done use the same ID
+    const getResponseId = (msg) => {
+        // Try to get ID from various places in the message
+        // response.content_part.done has response_id at top level
+        // response.done has id nested in msg.response.id
+        const actualId = msg.response_id || msg.response?.id;
+
+        if (actualId) {
+            // If we have an actual ID, check if we were using a fallback
+            // and migrate the buffer to the real ID
+            if (fallbackIdMap._current && !textBuf[actualId] && textBuf[fallbackIdMap._current]) {
+                textBuf[actualId] = textBuf[fallbackIdMap._current];
+                delete textBuf[fallbackIdMap._current];
+                delete fallbackIdMap._current;
+            }
+            return actualId;
+        }
+
+        // No ID found - use fallback system
+        // For content_part messages, create a new fallback if none exists for this "session"
+        if (!fallbackIdMap._current) {
+            fallbackIdMap._current = "_fallback_" + responseIdCounter++;
+        }
+        return fallbackIdMap._current;
+    };
+
+    // Clear the current fallback ID (called when response.done is received)
+    const clearCurrentFallback = () => {
+        delete fallbackIdMap._current;
+    };
 
     // Conversation history for local LLM (keeps last few exchanges)
     const MAX_HISTORY = 6;  // 3 exchanges (user + assistant each)
@@ -78,7 +112,7 @@ const WebRTC = (function() {
         const t = msg.type;
 
         if (t === "response.content_part.done") {
-            const id = msg.response_id || "r";
+            const id = getResponseId(msg);
             if (msg.part?.type === "text") {
                 textBuf[id] = (textBuf[id] || "") + (msg.part.text || "");
             } else if (msg.part?.type === "audio" && msg.part?.transcript) {
@@ -94,9 +128,10 @@ const WebRTC = (function() {
         }
 
         if (t === "response.done" && msg.response) {
-            const id = msg.response.id || msg.response_id || "r";
+            const id = getResponseId(msg);
             const assistantText = (textBuf[id] || "").trim();
             delete textBuf[id];
+            clearCurrentFallback();  // Reset fallback for next response
 
             const usage = msg.response.usage || msg.usage || {};
             const inTok = usage.input_tokens ?? usage.input_token_details?.text_tokens ?? 0;

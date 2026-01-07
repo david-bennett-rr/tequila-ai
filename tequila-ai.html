@@ -225,29 +225,29 @@
 
   <!-- JavaScript Modules -->
   <!-- Core infrastructure (no dependencies) -->
-  <script src="config.js"></script>
-  <script src="events.js"></script>
+  <script src="src/core/config.js"></script>
+  <script src="src/core/events.js"></script>
 
   <!-- Foundation modules -->
-  <script src="tequila-wars-summary.js"></script>
-  <script src="utils.js"></script>
-  <script src="storage.js"></script>
-  <script src="ui.js"></script>
+  <script src="src/data/tequila-wars-summary.js"></script>
+  <script src="src/core/utils.js"></script>
+  <script src="src/core/storage.js"></script>
+  <script src="src/core/ui.js"></script>
 
   <!-- State management (needs Events, UI) -->
-  <script src="app-state.js"></script>
+  <script src="src/core/app-state.js"></script>
 
   <!-- Watchdog system (needs Config, AppState, UI) -->
-  <script src="watchdog.js"></script>
+  <script src="src/monitoring/watchdog.js"></script>
 
   <!-- Feature modules (use all above) -->
-  <script src="noise-monitor.js"></script>
-  <script src="audio-monitor.js"></script>
-  <script src="tts-provider.js"></script>
-  <script src="speech.js"></script>
-  <script src="webrtc.js"></script>
+  <script src="src/audio/noise-monitor.js"></script>
+  <script src="src/audio/audio-monitor.js"></script>
+  <script src="src/tts/tts-provider.js"></script>
+  <script src="src/audio/speech.js"></script>
+  <script src="src/audio/webrtc.js"></script>
 
   <!-- Main app initialization -->
-  <script src="app.js"></script>
+  <script src="src/core/app.js"></script>
 </body>
 </html>
