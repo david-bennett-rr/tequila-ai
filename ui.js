@@ -64,8 +64,8 @@ const UI = (function() {
     row.appendChild(msg);
     row.appendChild(tok);
 
-    exWrap.appendChild(row);
-    exWrap.scrollTop = exWrap.scrollHeight;
+    exWrap.prepend(row);
+    exWrap.scrollTop = 0;
 
     totalIn += inS;
     totalOut += outS;
