@@ -14,7 +14,10 @@
         <h1>Tequila AI</h1>
         <span class="tagline">Your Tequila Expert</span>
       </div>
-      <div class="status-badge" id="status">idle</div>
+      <div class="header-right">
+        <div class="noise-indicator" id="noise-indicator" title="Noise level: calibrating"></div>
+        <div class="status-badge" id="status">idle</div>
+      </div>
     </header>
 
     <!-- Connection Controls -->
@@ -238,6 +241,7 @@
   <script src="watchdog.js"></script>
 
   <!-- Feature modules (use all above) -->
+  <script src="noise-monitor.js"></script>
   <script src="audio-monitor.js"></script>
   <script src="tts-provider.js"></script>
   <script src="speech.js"></script>

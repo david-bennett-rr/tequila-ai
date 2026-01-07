@@ -67,6 +67,9 @@ const Events = (function() {
         // State changes
         STATE_CHANGED: 'state:changed',
 
+        // Noise monitoring
+        NOISE_CALIBRATED: 'noise:calibrated',
+
         // Errors
         ERROR: 'error',
     };

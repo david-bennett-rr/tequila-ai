@@ -75,6 +75,38 @@ h1 {
   font-weight: 500;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.noise-indicator {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background-color: #888;
+  transition: background-color 0.3s ease;
+  cursor: help;
+  box-shadow: 0 0 6px currentColor;
+}
+
+.noise-indicator[title*="quiet"] {
+  box-shadow: 0 0 8px #4CAF50;
+}
+
+.noise-indicator[title*="moderate"] {
+  box-shadow: 0 0 8px #FFC107;
+}
+
+.noise-indicator[title*="noisy"] {
+  box-shadow: 0 0 8px #FF9800;
+}
+
+.noise-indicator[title*="loud"] {
+  box-shadow: 0 0 8px #f44336;
+}
+
 .status-badge {
   padding: 6px 14px;
   border-radius: 20px;

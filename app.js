@@ -164,6 +164,15 @@ const App = (function() {
             UI.toast("ready");
         }
 
+        // Initialize noise monitor for adaptive speech detection
+        if (typeof NoiseMonitor !== 'undefined') {
+            NoiseMonitor.setup().then(() => {
+                UI.log("[app] noise monitor ready");
+            }).catch(e => {
+                UI.log("[app] noise monitor unavailable: " + e.message);
+            });
+        }
+
         UI.log("[app] initialized with new module architecture");
     };
 

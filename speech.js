@@ -196,9 +196,27 @@ const Speech = (function() {
             const trimmedTranscript = finalTranscript.trim();
             const wordCount = trimmedTranscript.split(/\s+/).filter(w => w.length > 0).length;
 
-            if (trimmedTranscript && wordCount >= Config.MIN_WORDS_FOR_SEND) {
+            // Get adaptive settings from noise monitor (if available)
+            const adaptive = typeof NoiseMonitor !== 'undefined'
+                ? NoiseMonitor.getAdaptiveSettings()
+                : { silenceThreshold: Config.SILENCE_THRESHOLD, minWords: Config.MIN_WORDS_FOR_SEND };
+
+            if (trimmedTranscript && wordCount >= adaptive.minWords) {
+                // Capture confidence now, before setTimeout (event may be stale later)
+                const lastConfidence = event.results[event.results.length - 1]?.[0]?.confidence || 0.9;
+
                 silenceTimer = setTimeout(() => {
                     const textToSend = finalTranscript.trim();
+
+                    // Check if this looks like noise (if noise monitor available)
+                    if (typeof NoiseMonitor !== 'undefined') {
+                        if (NoiseMonitor.isLikelyNoise(textToSend, lastConfidence)) {
+                            finalTranscript = "";
+                            UI.setTranscript("Listening...", "listening");
+                            return;
+                        }
+                    }
+
                     UI.log("[speech] silence detected, sending: " + textToSend);
 
                     if (textToSend && AppState.canSendMessage()) {
@@ -208,7 +226,7 @@ const Speech = (function() {
                         UI.setTranscript("Processing...", "waiting");
                         AppState.transition(AppState.STATES.PROCESSING, 'user speech sent');
                     }
-                }, Config.SILENCE_THRESHOLD);
+                }, adaptive.silenceThreshold);
             }
         };
 

@@ -7,6 +7,10 @@ const WebRTC = (function() {
     let localLlmConnected = false;
     const textBuf = Object.create(null);
 
+    // Conversation history for local LLM (keeps last few exchanges)
+    const MAX_HISTORY = 6;  // 3 exchanges (user + assistant each)
+    let conversationHistory = [];
+
     // Reconnect state
     let reconnectAttempts = 0;
     let reconnectTimer = null;
@@ -339,20 +343,28 @@ const WebRTC = (function() {
                                 (Storage.localLlmModel || "").toLowerCase().includes("dolphin") ||
                                 (Storage.localLlmModel || "").toLowerCase().includes("mistral");
 
+        // Build conversation history string
+        const historyText = conversationHistory.length > 0
+            ? conversationHistory.map(h => `${h.role === 'user' ? 'Guest' : 'You'}: ${h.content}`).join('\n') + '\n'
+            : '';
+
         const finalPrompt = isInstructModel
             ? `You're a friendly bartender at a Jose Cuervo tasting. Chat naturally, keep it brief.
 
-Rules: 1 sentence max. No emojis. Be casual and warm.
+Rules: 1 sentence max. No emojis. Be casual and warm. Remember what the guest said before.
 
 Background: ${Summary.summary}
 
-Guest: ${text}
+${historyText}Guest: ${text}
 You:`
             : `[Bartender gives a quick, friendly one-liner]
 
-Guest: ${text}
+${historyText}Guest: ${text}
 Bartender:`;
         if (llmProvider === "local") {
+            // Add user message to history
+            conversationHistory.push({ role: 'user', content: text });
+
             // Send to local LLM endpoint (Ollama format)
             UI.log("[you] " + text);
             UI.addExchange("user", text, 0, 0);
@@ -387,12 +399,26 @@ Bartender:`;
             })
             .then(data => {
                 // Ollama returns { response: "..." }, other APIs might use { text: "..." }
-                const assistantText = data.response || data.text || data.content || "";
+                let assistantText = (data.response || data.text || data.content || "").trim();
                 if (!assistantText) {
                     UI.log("[local-llm] empty response: " + JSON.stringify(data));
                     UI.setTranscript("Listening...", "listening");
                     return;
                 }
+
+                // Clean up response - remove "You:" prefix if model included it
+                if (assistantText.toLowerCase().startsWith('you:')) {
+                    assistantText = assistantText.slice(4).trim();
+                }
+
+                // Add assistant response to history
+                conversationHistory.push({ role: 'assistant', content: assistantText });
+
+                // Trim history to max size
+                while (conversationHistory.length > MAX_HISTORY) {
+                    conversationHistory.shift();
+                }
+
                 UI.log("[assistant] " + assistantText);
                 UI.addExchange("assistant", assistantText, 0, 0);
 
@@ -463,6 +489,9 @@ You:`;
         // Mark that we intentionally disconnected (no auto-reconnect)
         AppState.setFlag('shouldBeConnected', false);
         reconnectAttempts = 0;
+
+        // Clear conversation history for fresh start
+        conversationHistory = [];
 
         // Clear any pending reconnect
         if (reconnectTimer) {
