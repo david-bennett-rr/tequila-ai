@@ -296,7 +296,7 @@ const WebRTC = (function() {
                 model: MODEL,
                 voice: VOICE,
                 output_audio_format: "pcm16",
-                instructions: "You are a concise, friendly voice assistant. Keep replies short. The user is sending text messages only, not audio."
+                instructions: Prompts.REALTIME_INSTRUCTIONS
             })
         });
 
@@ -384,18 +384,8 @@ const WebRTC = (function() {
             : '';
 
         const finalPrompt = isInstructModel
-            ? `You're a friendly bartender at a Jose Cuervo tasting. Chat naturally, keep it brief.
-
-Rules: 1 sentence max. No emojis. Be casual and warm. Remember what the guest said before.
-
-Background: ${Summary.summary}
-
-${historyText}Guest: ${text}
-You:`
-            : `[Bartender gives a quick, friendly one-liner]
-
-${historyText}Guest: ${text}
-Bartender:`;
+            ? Prompts.buildInstructPrompt(text, Summary.summary, historyText)
+            : Prompts.buildBasePrompt(text, historyText);
         if (llmProvider === "local") {
             // Add user message to history
             conversationHistory.push({ role: 'user', content: text });
@@ -491,14 +481,7 @@ Bartender:`;
         }
 
         // OpenAI uses its own prompt (always instruct-capable)
-        const openaiPrompt = `You're a friendly bartender at a Jose Cuervo tasting. Chat naturally, keep it brief.
-
-Rules: 1 sentence max. No emojis. Be casual and warm.
-
-Background: ${Summary.summary}
-
-Guest: ${text}
-You:`;
+        const openaiPrompt = Prompts.buildInstructPrompt(text, Summary.summary, '');
 
         const messages = [
             {

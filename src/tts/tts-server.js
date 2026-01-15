@@ -4,8 +4,10 @@
  * Runs either engine directly - no separate server needed.
  *
  * Usage:
- *    Piper:  node tts-server.js --engine piper --model en_US-john-medium.onnx
- *    Coqui:  node tts-server.js --engine coqui --coqui-model tts_models/en/vctk/vits
+ *    node tts-server.js              # Uses defaults (piper + auto-detected model)
+ *    node tts-server.js --help       # Show help
+ *    node tts-server.js --port 5003  # Custom port
+ *    node tts-server.js --engine coqui --coqui-model tts_models/en/vctk/vits
  */
 
 const http = require('http');
@@ -14,11 +16,60 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+// Paths relative to this script
+const SCRIPT_DIR = __dirname;
+const PIPER_DIR = path.resolve(SCRIPT_DIR, '../../piper');
+const DEFAULT_MODEL = 'en_US-john-medium.onnx';
+
+function showHelp() {
+    console.log(`
+TTS Server - Piper & Coqui text-to-speech
+
+Usage: node tts-server.js [options]
+
+Options:
+  --help              Show this help message
+  --engine <name>     TTS engine: piper (default) or coqui
+  --port <number>     Server port (default: 5002)
+  --model <file>      Piper model file (default: ${DEFAULT_MODEL})
+  --piper <path>      Path to piper executable
+  --coqui-model <id>  Coqui model name (default: tts_models/en/vctk/vits)
+
+Examples:
+  node tts-server.js                          # Start with defaults
+  node tts-server.js --port 5003              # Custom port
+  node tts-server.js --engine coqui           # Use Coqui TTS
+
+API:
+  GET  /api/tts?text=Hello                    # Query param
+  POST /api/tts  {"text": "Hello"}            # JSON body
+
+Available Piper models in ${PIPER_DIR}:
+`);
+    // List available models
+    if (fs.existsSync(PIPER_DIR)) {
+        const models = fs.readdirSync(PIPER_DIR).filter(f => f.endsWith('.onnx'));
+        if (models.length > 0) {
+            models.forEach(m => console.log(`  - ${m}`));
+        } else {
+            console.log('  (no models found)');
+        }
+    } else {
+        console.log('  (piper directory not found)');
+    }
+    console.log('');
+    process.exit(0);
+}
+
 const args = process.argv.slice(2);
+if (args.includes('--help') || args.includes('-h')) {
+    showHelp();
+}
+
 let engine = 'piper';
 let port = 5002;
 let model = '';
-let piperPath = process.platform === 'win32' ? 'piper.exe' : './piper';
+let piperPath = '';
 let coquiModel = 'tts_models/en/vctk/vits';
 
 for (let i = 0; i < args.length; i++) {
@@ -32,6 +83,22 @@ for (let i = 0; i < args.length; i++) {
         piperPath = args[++i];
     } else if (args[i] === '--coqui-model' && args[i + 1]) {
         coquiModel = args[++i];
+    }
+}
+
+// Auto-detect piper executable and model if not specified
+if (engine === 'piper') {
+    if (!piperPath) {
+        const defaultPiper = path.join(PIPER_DIR, process.platform === 'win32' ? 'piper.exe' : 'piper');
+        if (fs.existsSync(defaultPiper)) {
+            piperPath = defaultPiper;
+        }
+    }
+    if (!model) {
+        const defaultModel = path.join(PIPER_DIR, DEFAULT_MODEL);
+        if (fs.existsSync(defaultModel)) {
+            model = defaultModel;
+        }
     }
 }
 
@@ -164,23 +231,22 @@ function handleCoquiRequest(text, res) {
 // ============= Main Server =============
 if (engine === 'piper') {
     if (!model) {
-        console.error('Piper requires --model <file.onnx>');
-        console.error('Usage: node tts-server.js --engine piper --model en_US-john-medium.onnx');
+        console.error('Error: No Piper model found.');
+        console.error(`Expected model at: ${path.join(PIPER_DIR, DEFAULT_MODEL)}`);
+        console.error('Run with --help for usage info.');
         process.exit(1);
     }
     if (!fs.existsSync(model)) {
-        console.error(`Model not found: ${model}`);
+        console.error(`Error: Model not found: ${model}`);
         process.exit(1);
     }
-    if (!fs.existsSync(piperPath)) {
-        piperPath = fs.existsSync('piper') ? 'piper' : null;
-        if (!piperPath) {
-            console.error('Piper executable not found');
-            process.exit(1);
-        }
+    if (!piperPath || !fs.existsSync(piperPath)) {
+        console.error('Error: Piper executable not found.');
+        console.error(`Expected at: ${path.join(PIPER_DIR, 'piper.exe')}`);
+        process.exit(1);
     }
     console.log('[tts-server] Piper ready');
-    console.log(`[tts-server] Model: ${model}`);
+    console.log(`[tts-server] Model: ${path.basename(model)}`);
 } else if (engine === 'coqui') {
     // Verify tts is installed
     try {
