@@ -9,6 +9,12 @@ const WebRTC = (function() {
     let responseIdCounter = 0;  // Counter for generating unique fallback IDs
     const fallbackIdMap = Object.create(null);  // Maps missing response_ids to generated fallback IDs
 
+    // Streaming TTS state
+    let streamingBuffer = "";           // Accumulates text for sentence detection
+    let streamingQueue = [];            // Queue of sentences to speak
+    let isStreamingSpeaking = false;    // Is TTS currently playing a streamed chunk
+    let streamingResponseId = null;     // Track which response we're streaming
+
     // Get or create a consistent ID for a response
     // This ensures content_part.done and response.done use the same ID
     const getResponseId = (msg) => {
@@ -39,6 +45,98 @@ const WebRTC = (function() {
     // Clear the current fallback ID (called when response.done is received)
     const clearCurrentFallback = () => {
         delete fallbackIdMap._current;
+    };
+
+    // ============= Streaming TTS Functions =============
+
+    // Reset streaming state for new response
+    const resetStreamingState = () => {
+        streamingBuffer = "";
+        streamingQueue = [];
+        isStreamingSpeaking = false;
+        streamingResponseId = null;
+    };
+
+    // Extract complete sentences from buffer, return { sentences: [], remaining: "" }
+    const extractSentences = (text) => {
+        const sentences = [];
+        // Match sentences ending with . ! or ? (with optional quotes)
+        const regex = /[^.!?]*[.!?]+["']?\s*/g;
+        let match;
+        let lastIndex = 0;
+
+        while ((match = regex.exec(text)) !== null) {
+            const sentence = match[0].trim();
+            if (sentence.length > 0) {
+                sentences.push(sentence);
+            }
+            lastIndex = regex.lastIndex;
+        }
+
+        return {
+            sentences,
+            remaining: text.slice(lastIndex)
+        };
+    };
+
+    // Process next item in streaming queue
+    const processStreamingQueue = () => {
+        if (isStreamingSpeaking || streamingQueue.length === 0) return;
+
+        const sentence = streamingQueue.shift();
+        if (!sentence) return;
+
+        isStreamingSpeaking = true;
+        UI.log("[streaming] speaking: " + sentence.substring(0, 50) + (sentence.length > 50 ? "..." : ""));
+
+        const provider = TTSProvider.getProvider();
+
+        // Use streaming-aware TTS that calls back when done
+        if (provider === "elevenlabs") {
+            TTSProvider.speakWithElevenLabsStreaming(sentence, () => {
+                isStreamingSpeaking = false;
+                processStreamingQueue();
+            });
+        } else if (provider === "local") {
+            TTSProvider.speakWithLocalTTSStreaming(sentence, () => {
+                isStreamingSpeaking = false;
+                processStreamingQueue();
+            });
+        } else {
+            // Fallback - no streaming callback support
+            isStreamingSpeaking = false;
+            processStreamingQueue();
+        }
+    };
+
+    // Handle incoming text delta for streaming
+    const handleTextDelta = (delta, responseId) => {
+        // New response - reset state
+        if (streamingResponseId !== responseId) {
+            resetStreamingState();
+            streamingResponseId = responseId;
+        }
+
+        streamingBuffer += delta;
+
+        // Extract any complete sentences
+        const { sentences, remaining } = extractSentences(streamingBuffer);
+        streamingBuffer = remaining;
+
+        // Queue sentences for TTS
+        if (sentences.length > 0 && TTSProvider.shouldUseSpeech()) {
+            streamingQueue.push(...sentences);
+            processStreamingQueue();
+        }
+    };
+
+    // Flush any remaining text at end of response
+    const flushStreamingBuffer = () => {
+        if (streamingBuffer.trim() && TTSProvider.shouldUseSpeech()) {
+            streamingQueue.push(streamingBuffer.trim());
+            processStreamingQueue();
+        }
+        streamingBuffer = "";
     };
 
     // Conversation history for local LLM (keeps last few exchanges)
@@ -111,6 +209,16 @@ const WebRTC = (function() {
 
         const t = msg.type;
 
+        // Handle streaming text deltas for low-latency TTS
+        if (t === "response.text.delta" || t === "response.audio_transcript.delta") {
+            const id = getResponseId(msg);
+            const delta = msg.delta || "";
+            if (delta && TTSProvider.shouldUseSpeech()) {
+                handleTextDelta(delta, id);
+            }
+            return;
+        }
+
         if (t === "response.content_part.done") {
             const id = getResponseId(msg);
             if (msg.part?.type === "text") {
@@ -142,8 +250,12 @@ const WebRTC = (function() {
 
             Events.emit(Events.EVENTS.ASSISTANT_RESPONSE, { text: assistantText, inTok, outTok });
 
-            // Use ElevenLabs if selected
-            if (TTSProvider.shouldUseSpeech()) {
+            // Flush any remaining streamed text
+            flushStreamingBuffer();
+
+            // Only use non-streaming TTS if streaming didn't handle it
+            // (streaming handles TTS sentence-by-sentence as they arrive)
+            if (!streamingResponseId && TTSProvider.shouldUseSpeech()) {
                 const provider = TTSProvider.getProvider();
                 if (provider === "elevenlabs" && assistantText) {
                     TTSProvider.speakWithElevenLabs(assistantText);

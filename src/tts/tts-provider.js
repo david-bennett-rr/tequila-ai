@@ -294,6 +294,105 @@ const TTSProvider = (function() {
         }
     };
 
+    // ============= Streaming TTS Functions =============
+    // These accept a callback that fires when playback completes
+
+    const speakWithElevenLabsStreaming = async (text, onComplete) => {
+        const apiKey = Storage.elevenLabsKey?.trim();
+        const voiceId = Storage.elevenLabsVoice?.trim() || "21m00Tcm4TlvDq8ikWAM";
+
+        if (!apiKey) {
+            UI.log("[elevenlabs-stream] no API key");
+            onComplete?.();
+            return;
+        }
+
+        try {
+            Speech.setAssistantSpeaking(true);
+
+            const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+                method: "POST",
+                headers: {
+                    "xi-api-key": apiKey,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    text: text,
+                    model_id: "eleven_turbo_v2_5",
+                    voice_settings: { stability: 0.5, similarity_boost: 0.75 }
+                })
+            });
+
+            if (!response.ok) {
+                UI.log("[elevenlabs-stream] error: " + response.status);
+                Speech.setAssistantSpeaking(false);
+                onComplete?.();
+                return;
+            }
+
+            const audioBlob = await response.blob();
+            const audioUrl = URL.createObjectURL(audioBlob);
+
+            const audio = new Audio(audioUrl);
+            audio.onended = () => {
+                URL.revokeObjectURL(audioUrl);
+                Speech.setAssistantSpeaking(false);
+                onComplete?.();
+            };
+            audio.onerror = () => {
+                URL.revokeObjectURL(audioUrl);
+                Speech.setAssistantSpeaking(false);
+                onComplete?.();
+            };
+            await audio.play();
+        } catch (e) {
+            UI.log("[elevenlabs-stream] error: " + e.message);
+            Speech.setAssistantSpeaking(false);
+            onComplete?.();
+        }
+    };
+
+    const speakWithLocalTTSStreaming = async (text, onComplete) => {
+        const endpoint = Storage.localTtsEndpoint?.trim() || "http://localhost:5002/api/tts";
+
+        try {
+            Speech.setAssistantSpeaking(true);
+
+            const response = await fetch(endpoint, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: text })
+            });
+
+            if (!response.ok) {
+                UI.log("[local-tts-stream] error: " + response.status);
+                Speech.setAssistantSpeaking(false);
+                onComplete?.();
+                return;
+            }
+
+            const audioBlob = await response.blob();
+            const audioUrl = URL.createObjectURL(audioBlob);
+
+            const audio = new Audio(audioUrl);
+            audio.onended = () => {
+                URL.revokeObjectURL(audioUrl);
+                Speech.setAssistantSpeaking(false);
+                onComplete?.();
+            };
+            audio.onerror = () => {
+                URL.revokeObjectURL(audioUrl);
+                Speech.setAssistantSpeaking(false);
+                onComplete?.();
+            };
+            await audio.play();
+        } catch (e) {
+            UI.log("[local-tts-stream] error: " + e.message);
+            Speech.setAssistantSpeaking(false);
+            onComplete?.();
+        }
+    };
+
     const stop = () => {
         stopTTSWatchdogs();
         revokeCurrentAudioUrl();
@@ -323,6 +422,8 @@ const TTSProvider = (function() {
         speakWithBrowser,
         speakWithElevenLabs,
         speakWithLocalTTS,
+        speakWithElevenLabsStreaming,
+        speakWithLocalTTSStreaming,
         stop,
         getProvider,
         shouldUseSpeech,

@@ -2,7 +2,7 @@
 const Config = (function() {
     return {
         // Speech recognition
-        SILENCE_THRESHOLD: 1000,          // ms of silence before sending speech
+        SILENCE_THRESHOLD: 700,           // ms of silence before sending speech
         MIN_WORDS_FOR_SEND: 2,            // minimum words before considering send
 
         // Retry/backoff settings
