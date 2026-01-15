@@ -53,6 +53,7 @@ const Events = (function() {
         LISTENING_ERROR: 'speech:listening-error',
         TRANSCRIPT_UPDATE: 'speech:transcript-update',
         USER_SPEECH_FINAL: 'speech:user-final',
+        USER_INTERRUPTED: 'speech:user-interrupted',
 
         // Assistant events
         ASSISTANT_SPEAKING_STARTED: 'assistant:speaking-started',

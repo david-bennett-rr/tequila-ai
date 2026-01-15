@@ -118,6 +118,23 @@
           </div>
         </div>
 
+        <!-- Speech Input Configuration -->
+        <div class="settings-section">
+          <h3>Speech Input</h3>
+          <div class="setting-row">
+            <label class="toggle">
+              <input type="checkbox" id="useDirectAudio">
+              <span class="toggle-slider"></span>
+              <span class="toggle-label">Direct Audio to OpenAI</span>
+            </label>
+          </div>
+          <p class="help-text" id="directAudioHelp">
+            Sends audio directly to OpenAI for faster response.<br/>
+            Uses server-side VAD instead of browser speech recognition.<br/>
+            <strong>Requires reconnect after changing.</strong>
+          </p>
+        </div>
+
         <!-- TTS Configuration -->
         <div class="settings-section">
           <h3>Text-to-Speech</h3>

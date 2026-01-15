@@ -7,6 +7,62 @@ const Speech = (function() {
     let recognitionBlocked = false;
     let retryCount = 0;
 
+    // Store handler references for cleanup
+    let handlers = {
+        onstart: null,
+        onend: null,
+        onresult: null,
+        onerror: null
+    };
+
+    // Phrases that indicate user wants to interrupt/stop the assistant
+    const INTERRUPTION_PHRASES = [
+        // English - direct commands
+        'stop', 'shut up', 'be quiet', 'quiet', 'enough', 'ok stop',
+        'okay stop', 'hold on', 'wait', 'pause', 'never mind', 'nevermind',
+        'hang on', 'one sec', 'one second', 'hey', 'excuse me', 'sorry',
+        'actually', 'um actually', 'no no', 'no wait',
+        // English - additional
+        'shh', 'shhh', 'hush', 'silence', 'that\'s enough', 'okay okay',
+        'ok ok', 'got it', 'i got it', 'i get it', 'thanks', 'thank you',
+        'skip', 'next', 'stop talking', 'stop it', 'quit it', 'can you stop',
+        'please stop', 'alright', 'all right', 'yeah yeah', 'yes yes',
+        'i know', 'i understand', 'understood', 'fine', 'okay fine',
+        'moving on', 'let me', 'let me speak', 'my turn', 'hold it',
+        'wait wait', 'whoa', 'woah', 'hey hey', 'um', 'uh', 'hmm',
+        // Spanish - direct commands
+        'para', 'párate', 'basta', 'espera', 'cállate', 'silencio',
+        'un momento', 'alto', 'ya', 'ya basta', 'ya estuvo',
+        // Spanish - attention/interruption
+        'oye', 'oiga', 'perdón', 'perdona', 'disculpa', 'disculpe',
+        'gracias', 'muchas gracias', 'ok ya', 'okay ya', 'está bien',
+        // Spanish - additional
+        'momento', 'espérate', 'aguanta', 'detente', 'calla', 'shh',
+        'ya entendí', 'ya sé', 'entiendo', 'entendido', 'listo',
+        'bueno', 'bueno ya', 'órale', 'ándale', 'sale', 'va',
+        'no no', 'no espera', 'un segundo', 'tantito', 'ahorita',
+        'mira', 'oyes', 'este', 'eh', 'ah', 'ey'
+    ];
+
+    // Check if text contains an interruption phrase
+    const isInterruption = (text) => {
+        const lower = text.toLowerCase().trim();
+        return INTERRUPTION_PHRASES.some(phrase =>
+            lower === phrase ||
+            lower.startsWith(phrase + ' ') ||
+            lower.endsWith(' ' + phrase)
+        );
+    };
+
+    // Remove all event handlers from recognition object
+    const removeHandlers = () => {
+        if (!recognition) return;
+        recognition.onstart = null;
+        recognition.onend = null;
+        recognition.onresult = null;
+        recognition.onerror = null;
+    };
+
     // Calculate retry delay with exponential backoff
     const getRetryDelay = () => {
         return Math.min(Config.BASE_RETRY_DELAY * Math.pow(2, retryCount), Config.MAX_RETRY_DELAY);
@@ -14,6 +70,7 @@ const Speech = (function() {
 
     // Attempt to start recognition with retry logic
     // Uses recognitionBlocked as a mutex to prevent concurrent start attempts
+    // Note: We allow starting even when assistant is speaking to detect interruptions
     const tryStartRecognition = () => {
         // Early exit conditions - check all flags atomically
         if (!recognition) {
@@ -31,10 +88,7 @@ const Speech = (function() {
         if (!AppState.getFlag('shouldBeListening')) {
             return; // Silent exit - user doesn't want to listen
         }
-        if (AppState.getFlag('assistantSpeaking')) {
-            UI.log("[speech] tryStart: assistant speaking");
-            return;
-        }
+        // Note: Removed assistantSpeaking check - we keep listening to detect interruptions
 
         // Set mutex before attempting start
         recognitionBlocked = true;
@@ -114,12 +168,17 @@ const Speech = (function() {
             return false;
         }
 
-        recognition = new SpeechRecognition();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.lang = 'en-US';
+        // Clean up existing handlers if reinitializing
+        removeHandlers();
 
-        recognition.onstart = () => {
+        if (!recognition) {
+            recognition = new SpeechRecognition();
+            recognition.continuous = true;
+            recognition.interimResults = true;
+            recognition.lang = 'en-US';
+        }
+
+        handlers.onstart = () => {
             AppState.setFlag('recognitionActive', true);
             recognitionBlocked = false;
             updateButtonToStop();
@@ -132,7 +191,7 @@ const Speech = (function() {
             }
         };
 
-        recognition.onend = () => {
+        handlers.onend = () => {
             AppState.setFlag('recognitionActive', false);
             recognitionBlocked = false;
             UI.log("[speech] recognition ended");
@@ -143,18 +202,17 @@ const Speech = (function() {
                 silenceTimer = null;
             }
 
-            // Auto-restart if we should be listening and assistant isn't speaking
-            if (AppState.getFlag('shouldBeListening') && !AppState.getFlag('assistantSpeaking')) {
+            // Auto-restart if we should be listening (even during assistant speech for interruption detection)
+            if (AppState.getFlag('shouldBeListening')) {
                 const delay = getRetryDelay();
                 UI.log("[speech] auto-restarting in " + delay + "ms");
                 setTimeout(() => {
                     if (AppState.getFlag('shouldBeListening') &&
-                        !AppState.getFlag('assistantSpeaking') &&
                         !AppState.getFlag('recognitionActive')) {
                         tryStartRecognition();
                     }
                 }, delay);
-            } else if (!AppState.getFlag('shouldBeListening')) {
+            } else {
                 updateButtonToStart();
                 UI.setTranscript("Click to start listening...");
                 if (AppState.isConnected()) {
@@ -163,11 +221,7 @@ const Speech = (function() {
             }
         };
 
-        recognition.onresult = (event) => {
-            if (AppState.getFlag('assistantSpeaking')) {
-                return;
-            }
-
+        handlers.onresult = (event) => {
             let interimTranscript = "";
             let currentFinal = "";
 
@@ -178,6 +232,23 @@ const Speech = (function() {
                 } else {
                     interimTranscript = transcript;
                 }
+            }
+
+            // Check for interruption while assistant is speaking
+            if (AppState.getFlag('assistantSpeaking')) {
+                const heardText = (currentFinal + interimTranscript).trim();
+                if (heardText && isInterruption(heardText)) {
+                    UI.log("[speech] interruption detected: '" + heardText + "'");
+                    // Stop TTS playback
+                    TTSProvider.stop();
+                    // Reset streaming TTS queue in WebRTC
+                    Events.emit(Events.EVENTS.USER_INTERRUPTED);
+                    // Clear assistant speaking state
+                    setAssistantSpeaking(false);
+                    finalTranscript = "";
+                    UI.setTranscript("Listening...", "listening");
+                }
+                return;  // Don't process as normal speech while assistant talking
             }
 
             if (currentFinal) {
@@ -230,7 +301,7 @@ const Speech = (function() {
             }
         };
 
-        recognition.onerror = (event) => {
+        handlers.onerror = (event) => {
             recognitionBlocked = false;
             AppState.setFlag('recognitionActive', false);
 
@@ -246,20 +317,25 @@ const Speech = (function() {
 
             const recoverableErrors = ['network', 'audio-capture', 'no-speech'];
             if (recoverableErrors.includes(event.error) &&
-                AppState.getFlag('shouldBeListening') &&
-                !AppState.getFlag('assistantSpeaking')) {
+                AppState.getFlag('shouldBeListening')) {
+                // Recover even during assistant speech (for interruption detection)
                 retryCount++;
                 const delay = getRetryDelay();
                 UI.log("[speech] recoverable error, retrying in " + delay + "ms");
                 setTimeout(() => {
                     if (AppState.getFlag('shouldBeListening') &&
-                        !AppState.getFlag('assistantSpeaking') &&
                         !AppState.getFlag('recognitionActive')) {
                         tryStartRecognition();
                     }
                 }, delay);
             }
         };
+
+        // Assign handlers to recognition object
+        recognition.onstart = handlers.onstart;
+        recognition.onend = handlers.onend;
+        recognition.onresult = handlers.onresult;
+        recognition.onerror = handlers.onerror;
 
         return true;
     };
@@ -302,7 +378,7 @@ const Speech = (function() {
                 }
             });
 
-            if (!AppState.getFlag('recognitionActive') && !AppState.getFlag('assistantSpeaking')) {
+            if (!AppState.getFlag('recognitionActive')) {
                 tryStartRecognition();
             }
         }
@@ -326,6 +402,9 @@ const Speech = (function() {
         AppState.setFlag('recognitionActive', false);
         recognitionBlocked = false;
         retryCount = 0;
+
+        // Clean up event handlers to prevent memory leaks
+        removeHandlers();
 
         updateButtonToStart();
         UI.setTranscript("Click to start listening...");

@@ -5,6 +5,8 @@ const WebRTC = (function() {
     let dataChannel = null;
     let remoteAudio = null;
     let localLlmConnected = false;
+    let localStream = null;  // Microphone stream for direct audio mode
+    let micMuted = false;    // Track microphone mute state
     const textBuf = Object.create(null);
     let responseIdCounter = 0;  // Counter for generating unique fallback IDs
     const fallbackIdMap = Object.create(null);  // Maps missing response_ids to generated fallback IDs
@@ -14,6 +16,8 @@ const WebRTC = (function() {
     let streamingQueue = [];            // Queue of sentences to speak
     let isStreamingSpeaking = false;    // Is TTS currently playing a streamed chunk
     let streamingResponseId = null;     // Track which response we're streaming
+    let streamingGeneration = 0;        // Generation counter to invalidate stale callbacks
+    let streamingResponseComplete = false;  // True when response.done received, waiting for queue to drain
 
     // Get or create a consistent ID for a response
     // This ensures content_part.done and response.done use the same ID
@@ -47,6 +51,24 @@ const WebRTC = (function() {
         delete fallbackIdMap._current;
     };
 
+    // Mute/unmute microphone to prevent feedback when assistant speaks
+    const setMicMuted = (muted) => {
+        if (!localStream) return;
+        micMuted = muted;
+        localStream.getAudioTracks().forEach(track => {
+            track.enabled = !muted;
+        });
+        UI.log("[mic] " + (muted ? "muted" : "unmuted"));
+    };
+
+    // Event unsubscribe functions for cleanup
+    let unsubSpeakingStarted = null;
+    let unsubSpeakingStopped = null;
+    let unsubUserInterrupted = null;
+
+    // Guard against concurrent cleanup
+    let cleanupInProgress = false;
+
     // ============= Streaming TTS Functions =============
 
     // Reset streaming state for new response
@@ -55,6 +77,8 @@ const WebRTC = (function() {
         streamingQueue = [];
         isStreamingSpeaking = false;
         streamingResponseId = null;
+        streamingGeneration++;  // Invalidate any pending callbacks
+        streamingResponseComplete = false;
     };
 
     // Extract complete sentences from buffer, return { sentences: [], remaining: "" }
@@ -81,31 +105,45 @@ const WebRTC = (function() {
 
     // Process next item in streaming queue
     const processStreamingQueue = () => {
-        if (isStreamingSpeaking || streamingQueue.length === 0) return;
+        if (isStreamingSpeaking || streamingQueue.length === 0) {
+            // Queue empty and not speaking - check if response is complete
+            if (!isStreamingSpeaking && streamingQueue.length === 0 &&
+                streamingResponseComplete && AppState.getFlag('assistantSpeaking')) {
+                UI.log("[streaming] queue drained - assistant done speaking");
+                Speech.setAssistantSpeaking(false);
+                streamingResponseComplete = false;  // Reset for next response
+            }
+            return;
+        }
 
         const sentence = streamingQueue.shift();
         if (!sentence) return;
 
         isStreamingSpeaking = true;
+        const currentGen = streamingGeneration;  // Capture generation for callback validation
         UI.log("[streaming] speaking: " + sentence.substring(0, 50) + (sentence.length > 50 ? "..." : ""));
 
         const provider = TTSProvider.getProvider();
 
-        // Use streaming-aware TTS that calls back when done
-        if (provider === "elevenlabs") {
-            TTSProvider.speakWithElevenLabsStreaming(sentence, () => {
-                isStreamingSpeaking = false;
-                processStreamingQueue();
-            });
-        } else if (provider === "local") {
-            TTSProvider.speakWithLocalTTSStreaming(sentence, () => {
-                isStreamingSpeaking = false;
-                processStreamingQueue();
-            });
-        } else {
-            // Fallback - no streaming callback support
+        // Callback that validates generation before continuing
+        const onComplete = () => {
+            // Ignore callback if generation changed (new response started)
+            if (currentGen !== streamingGeneration) {
+                UI.log("[streaming] ignoring stale callback (gen " + currentGen + " vs " + streamingGeneration + ")");
+                return;
+            }
             isStreamingSpeaking = false;
             processStreamingQueue();
+        };
+
+        // Use streaming-aware TTS that calls back when done
+        if (provider === "elevenlabs") {
+            TTSProvider.speakWithElevenLabsStreaming(sentence, onComplete);
+        } else if (provider === "local") {
+            TTSProvider.speakWithLocalTTSStreaming(sentence, onComplete);
+        } else {
+            // Fallback - no streaming callback support, use setTimeout to avoid stack overflow
+            setTimeout(onComplete, 0);
         }
     };
 
@@ -115,6 +153,8 @@ const WebRTC = (function() {
         if (streamingResponseId !== responseId) {
             resetStreamingState();
             streamingResponseId = responseId;
+            // Reset TTS stopped flag so new speech can play
+            TTSProvider.resetStoppedFlag();
         }
 
         streamingBuffer += delta;
@@ -134,9 +174,12 @@ const WebRTC = (function() {
     const flushStreamingBuffer = () => {
         if (streamingBuffer.trim() && TTSProvider.shouldUseSpeech()) {
             streamingQueue.push(streamingBuffer.trim());
-            processStreamingQueue();
         }
         streamingBuffer = "";
+        // Mark response as complete - queue will set assistantSpeaking=false when drained
+        streamingResponseComplete = true;
+        // Trigger queue processing (in case queue is already empty)
+        processStreamingQueue();
     };
 
     // Conversation history for local LLM (keeps last few exchanges)
@@ -209,6 +252,34 @@ const WebRTC = (function() {
 
         const t = msg.type;
 
+        // Handle server VAD events (direct audio mode)
+        if (t === "input_audio_buffer.speech_started") {
+            UI.log("[vad] speech started");
+            UI.setTranscript("Listening...", "listening");
+            return;
+        }
+
+        if (t === "input_audio_buffer.speech_stopped") {
+            UI.log("[vad] speech stopped");
+            UI.setTranscript("Processing...", "waiting");
+            return;
+        }
+
+        if (t === "input_audio_buffer.committed") {
+            UI.log("[vad] audio committed");
+            return;
+        }
+
+        // Handle user transcription (from Whisper in direct audio mode)
+        if (t === "conversation.item.input_audio_transcription.completed") {
+            const transcript = msg.transcript || "";
+            if (transcript) {
+                UI.log("[you] " + transcript);
+                UI.addExchange("user", transcript, 0, 0);
+            }
+            return;
+        }
+
         // Handle streaming text deltas for low-latency TTS
         if (t === "response.text.delta" || t === "response.audio_transcript.delta") {
             const id = getResponseId(msg);
@@ -256,6 +327,8 @@ const WebRTC = (function() {
             // Only use non-streaming TTS if streaming didn't handle it
             // (streaming handles TTS sentence-by-sentence as they arrive)
             if (!streamingResponseId && TTSProvider.shouldUseSpeech()) {
+                // Reset stopped flag so new speech can play
+                TTSProvider.resetStoppedFlag();
                 const provider = TTSProvider.getProvider();
                 if (provider === "elevenlabs" && assistantText) {
                     TTSProvider.speakWithElevenLabs(assistantText);
@@ -269,10 +342,39 @@ const WebRTC = (function() {
     };
 
     const cleanupConnection = () => {
-        try { dataChannel?.close(); } catch {}
-        try { pc?.close(); } catch {}
-        pc = null;
-        dataChannel = null;
+        // Guard against concurrent cleanup calls
+        if (cleanupInProgress) {
+            UI.log("[cleanup] already in progress, skipping");
+            return;
+        }
+        cleanupInProgress = true;
+
+        try {
+            try { dataChannel?.close(); } catch {}
+            try { pc?.close(); } catch {}
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+            // Unsubscribe from events
+            if (unsubSpeakingStarted) {
+                unsubSpeakingStarted();
+                unsubSpeakingStarted = null;
+            }
+            if (unsubSpeakingStopped) {
+                unsubSpeakingStopped();
+                unsubSpeakingStopped = null;
+            }
+            if (unsubUserInterrupted) {
+                unsubUserInterrupted();
+                unsubUserInterrupted = null;
+            }
+            micMuted = false;
+            pc = null;
+            dataChannel = null;
+        } finally {
+            cleanupInProgress = false;
+        }
     };
 
     const connect = async () => {
@@ -367,6 +469,31 @@ const WebRTC = (function() {
             AudioMonitor.setup(stream);
         };
 
+        // Check if direct audio mode is enabled
+        const useDirectAudio = Storage.useDirectAudio;
+
+        if (useDirectAudio) {
+            // Capture microphone and add to WebRTC connection
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true,
+                        sampleRate: 24000  // OpenAI expects 24kHz
+                    }
+                });
+                localStream.getTracks().forEach(track => {
+                    pc.addTrack(track, localStream);
+                });
+                UI.log("[audio] microphone added to WebRTC (direct audio mode)");
+            } catch (e) {
+                UI.log("[audio] microphone access failed: " + e.message);
+                UI.toast("Microphone access denied");
+                // Fall back to text mode
+            }
+        }
+
         dataChannel = pc.createDataChannel("oai-events");
         dataChannel.onopen = () => {
             UI.log("[dc] open");
@@ -397,6 +524,38 @@ const WebRTC = (function() {
         });
         await pc.setLocalDescription(offer);
 
+        // Build session config based on mode
+        const ttsProvider = TTSProvider.getProvider();
+        const wantOpenAIAudio = ttsProvider === "openai";
+
+        const sessionConfig = {
+            model: MODEL,
+            voice: VOICE,
+            instructions: Prompts.REALTIME_INSTRUCTIONS
+        };
+
+        // Only request audio output if using OpenAI TTS
+        if (wantOpenAIAudio) {
+            sessionConfig.output_audio_format = "pcm16";
+            sessionConfig.modalities = ["text", "audio"];
+        } else {
+            // Text-only output for ElevenLabs/Local/Browser TTS
+            sessionConfig.modalities = ["text"];
+        }
+
+        // Enable audio input if direct audio mode
+        if (useDirectAudio && localStream) {
+            sessionConfig.input_audio_format = "pcm16";
+            sessionConfig.input_audio_transcription = { model: "whisper-1" };
+            sessionConfig.turn_detection = {
+                type: "server_vad",
+                threshold: 0.5,
+                prefix_padding_ms: 300,
+                silence_duration_ms: 500  // How long to wait after speech stops
+            };
+            UI.log("[session] direct audio mode with server VAD" + (wantOpenAIAudio ? "" : " (text-only response)"));
+        }
+
         const createSession = await fetch("https://api.openai.com/v1/realtime/sessions", {
             method: "POST",
             headers: {
@@ -404,12 +563,7 @@ const WebRTC = (function() {
                 "Content-Type": "application/json",
                 "OpenAI-Beta": "realtime=v1"
             },
-            body: JSON.stringify({
-                model: MODEL,
-                voice: VOICE,
-                output_audio_format: "pcm16",
-                instructions: Prompts.REALTIME_INSTRUCTIONS
-            })
+            body: JSON.stringify(sessionConfig)
         });
 
         if (!createSession.ok) {
@@ -460,7 +614,22 @@ const WebRTC = (function() {
         // Start connection monitoring using Watchdog
         Watchdog.startConnectionMonitor(scheduleReconnect);
 
-        Speech.init();
+        // Listen for user interruptions to reset streaming TTS
+        unsubUserInterrupted = Events.on(Events.EVENTS.USER_INTERRUPTED, () => {
+            UI.log("[streaming] user interrupted - clearing queue");
+            resetStreamingState();
+        });
+
+        // Only use browser Speech API if not in direct audio mode
+        if (!useDirectAudio || !localStream) {
+            Speech.init();
+        } else {
+            UI.log("[sys] direct audio mode - skipping browser speech recognition");
+            UI.setTranscript("Listening (direct audio)...", "listening");
+            // Note: We don't mute the mic during assistant speech in direct audio mode
+            // OpenAI's server VAD will detect user interruptions automatically
+            // The echo cancellation in getUserMedia should handle feedback
+        }
     };
 
     // Wrapper that catches errors and triggers reconnect
@@ -515,80 +684,86 @@ const WebRTC = (function() {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 120000);
 
-            fetch(localLlmEndpoint, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    model: Storage.localLlmModel || "llama2",
-                    prompt: finalPrompt,
-                    stream: false
-                }),
-                signal: controller.signal
-            })
-            .then(res => {
-                clearTimeout(timeoutId);
-                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-                UI.log("[local-llm] response received in " + elapsed + "s");
-                if (!res.ok) {
-                    throw new Error("HTTP " + res.status);
-                }
-                return res.json();
-            })
-            .then(data => {
-                // Ollama returns { response: "..." }, other APIs might use { text: "..." }
-                let assistantText = (data.response || data.text || data.content || "").trim();
-                if (!assistantText) {
-                    UI.log("[local-llm] empty response: " + JSON.stringify(data));
-                    UI.setTranscript("Listening...", "listening");
-                    return;
-                }
+            (async () => {
+                try {
+                    const res = await fetch(localLlmEndpoint, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            model: Storage.localLlmModel || "llama2",
+                            prompt: finalPrompt,
+                            stream: false
+                        }),
+                        signal: controller.signal
+                    });
 
-                // Clean up response - remove "You:" prefix if model included it
-                if (assistantText.toLowerCase().startsWith('you:')) {
-                    assistantText = assistantText.slice(4).trim();
-                }
+                    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                    UI.log("[local-llm] response received in " + elapsed + "s");
 
-                // Add assistant response to history
-                conversationHistory.push({ role: 'assistant', content: assistantText });
-
-                // Trim history to max size
-                while (conversationHistory.length > MAX_HISTORY) {
-                    conversationHistory.shift();
-                }
-
-                UI.log("[assistant] " + assistantText);
-                UI.addExchange("assistant", assistantText, 0, 0);
-
-                Events.emit(Events.EVENTS.ASSISTANT_RESPONSE, { text: assistantText, inTok: 0, outTok: 0 });
-
-                if (TTSProvider.shouldUseSpeech()) {
-                    const provider = TTSProvider.getProvider();
-                    if (provider === "elevenlabs" && assistantText) {
-                        TTSProvider.speakWithElevenLabs(assistantText);
-                    } else if (provider === "browser" && assistantText) {
-                        TTSProvider.speakWithBrowser(assistantText);
-                    } else if (provider === "local" && assistantText) {
-                        TTSProvider.speakWithLocalTTS(assistantText);
+                    if (!res.ok) {
+                        throw new Error("HTTP " + res.status);
                     }
-                } else {
-                    // No TTS - go back to listening
-                    UI.setTranscript("Listening...", "listening");
-                }
-            })
-            .catch(e => {
-                clearTimeout(timeoutId);
-                if (e.name === 'AbortError') {
-                    UI.log("[local-llm] TIMEOUT: model took too long (>2min). Try a smaller model.");
-                    UI.toast("LLM timeout - try smaller model");
-                } else {
-                    UI.log("[local-llm] error: " + e.message);
-                    if (e.message === "Failed to fetch") {
-                        UI.log("[local-llm] Hint: Is Ollama running? Try: OLLAMA_ORIGINS=* ollama serve");
+
+                    const data = await res.json();
+
+                    // Ollama returns { response: "..." }, other APIs might use { text: "..." }
+                    let assistantText = (data.response || data.text || data.content || "").trim();
+                    if (!assistantText) {
+                        UI.log("[local-llm] empty response: " + JSON.stringify(data));
+                        UI.setTranscript("Listening...", "listening");
+                        return;
                     }
+
+                    // Clean up response - remove "You:" prefix if model included it
+                    if (assistantText.toLowerCase().startsWith('you:')) {
+                        assistantText = assistantText.slice(4).trim();
+                    }
+
+                    // Add assistant response to history
+                    conversationHistory.push({ role: 'assistant', content: assistantText });
+
+                    // Trim history to max size
+                    while (conversationHistory.length > MAX_HISTORY) {
+                        conversationHistory.shift();
+                    }
+
+                    UI.log("[assistant] " + assistantText);
+                    UI.addExchange("assistant", assistantText, 0, 0);
+
+                    Events.emit(Events.EVENTS.ASSISTANT_RESPONSE, { text: assistantText, inTok: 0, outTok: 0 });
+
+                    if (TTSProvider.shouldUseSpeech()) {
+                        // Reset stopped flag so new speech can play
+                        TTSProvider.resetStoppedFlag();
+                        const provider = TTSProvider.getProvider();
+                        if (provider === "elevenlabs" && assistantText) {
+                            TTSProvider.speakWithElevenLabs(assistantText);
+                        } else if (provider === "browser" && assistantText) {
+                            TTSProvider.speakWithBrowser(assistantText);
+                        } else if (provider === "local" && assistantText) {
+                            TTSProvider.speakWithLocalTTS(assistantText);
+                        }
+                    } else {
+                        // No TTS - go back to listening
+                        UI.setTranscript("Listening...", "listening");
+                    }
+                } catch (e) {
+                    if (e.name === 'AbortError') {
+                        UI.log("[local-llm] TIMEOUT: model took too long (>2min). Try a smaller model.");
+                        UI.toast("LLM timeout - try smaller model");
+                    } else {
+                        UI.log("[local-llm] error: " + e.message);
+                        if (e.message === "Failed to fetch") {
+                            UI.log("[local-llm] Hint: Is Ollama running? Try: OLLAMA_ORIGINS=* ollama serve");
+                        }
+                    }
+                    Events.emit(Events.EVENTS.ERROR, { source: 'local-llm', error: e.message });
+                    UI.setTranscript("Listening...", "listening");
+                } finally {
+                    // Always clear timeout to prevent leaks
+                    clearTimeout(timeoutId);
                 }
-                Events.emit(Events.EVENTS.ERROR, { source: 'local-llm', error: e.message });
-                UI.setTranscript("Listening...", "listening");
-            });
+            })();
             return;
         }
 
@@ -652,6 +827,7 @@ const WebRTC = (function() {
         connect: connectWithRetry,
         sendText,
         hangup,
-        isConnected
+        isConnected,
+        setMicMuted
     };
 })();

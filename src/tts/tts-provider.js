@@ -6,6 +6,69 @@ const TTSProvider = (function() {
     let chromeResumeHackTimer = null;
     let currentAudioUrl = null;  // Track current object URL for cleanup
 
+    // Track active streaming audio for cleanup on stop
+    let activeStreamingAudio = null;
+    let streamingStopped = false;  // Flag to prevent callbacks after stop
+
+    // Audio processing for volume normalization
+    let audioContext = null;
+    let compressor = null;
+    let gainNode = null;
+
+    // Initialize audio processing chain with compressor/limiter
+    const initAudioProcessing = () => {
+        if (audioContext) return;
+        try {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+            // Compressor to tame loud peaks
+            compressor = audioContext.createDynamicsCompressor();
+            compressor.threshold.value = -24;  // Start compressing at -24dB
+            compressor.knee.value = 12;        // Soft knee for natural sound
+            compressor.ratio.value = 8;        // 8:1 compression ratio
+            compressor.attack.value = 0.003;   // Fast attack (3ms)
+            compressor.release.value = 0.15;   // Moderate release (150ms)
+
+            // Gain node for overall volume control
+            gainNode = audioContext.createGain();
+            gainNode.gain.value = 0.8;  // Slightly reduce overall volume
+
+            // Chain: source -> compressor -> gain -> destination
+            compressor.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+
+            UI.log("[audio] volume limiter initialized");
+        } catch (e) {
+            UI.log("[audio] failed to init volume limiter: " + e.message);
+        }
+    };
+
+    // Track which audio elements have been connected to avoid double-connect error
+    const connectedElements = new WeakSet();
+
+    // Play audio through the compressor chain
+    const playWithLimiter = async (audioElement) => {
+        initAudioProcessing();
+        if (!audioContext || !compressor) {
+            // Fallback to direct playback
+            return audioElement.play();
+        }
+
+        // Resume audio context if suspended (browser autoplay policy)
+        if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+        }
+
+        // Only connect once per audio element (createMediaElementSource can only be called once)
+        if (!connectedElements.has(audioElement)) {
+            const source = audioContext.createMediaElementSource(audioElement);
+            source.connect(compressor);
+            connectedElements.add(audioElement);
+        }
+
+        return audioElement.play();
+    };
+
     // Revoke current audio URL if one exists
     const revokeCurrentAudioUrl = () => {
         if (currentAudioUrl) {
@@ -39,6 +102,11 @@ const TTSProvider = (function() {
 
     // Handle TTS completion
     const handleTTSComplete = (provider) => {
+        // Ignore if stop() was called (streamingStopped is set)
+        if (streamingStopped) {
+            UI.log("[" + provider + "] ignoring completion after stop");
+            return;
+        }
         stopTTSWatchdogs();
         Speech.setAssistantSpeaking(false);
         UI.log("[" + provider + "] playback complete");
@@ -47,6 +115,11 @@ const TTSProvider = (function() {
 
     // Handle TTS error
     const handleTTSError = (provider, error) => {
+        // Ignore if stop() was called (streamingStopped is set)
+        if (streamingStopped) {
+            UI.log("[" + provider + "] ignoring error after stop");
+            return;
+        }
         stopTTSWatchdogs();
         UI.log("[" + provider + "] error: " + error);
         Speech.setAssistantSpeaking(false);
@@ -204,8 +277,8 @@ const TTSProvider = (function() {
                 handleTTSError('elevenlabs', e?.message || 'playback error');
             };
 
-            await elevenLabsAudio.play();
-            UI.log("[elevenlabs] playing audio");
+            await playWithLimiter(elevenLabsAudio);
+            UI.log("[elevenlabs] playing audio (limited)");
         } catch (e) {
             // Clean up this call's URL if it was created
             if (audioUrl) {
@@ -279,8 +352,8 @@ const TTSProvider = (function() {
                 handleTTSError('local', e?.message || 'playback error');
             };
 
-            await elevenLabsAudio.play();
-            UI.log("[local-tts] playing audio");
+            await playWithLimiter(elevenLabsAudio);
+            UI.log("[local-tts] playing audio (limited)");
         } catch (e) {
             // Clean up this call's URL if it was created
             if (audioUrl) {
@@ -298,6 +371,12 @@ const TTSProvider = (function() {
     // These accept a callback that fires when playback completes
 
     const speakWithElevenLabsStreaming = async (text, onComplete) => {
+        // Check if stopped before even starting
+        if (streamingStopped) {
+            onComplete?.();
+            return;
+        }
+
         const apiKey = Storage.elevenLabsKey?.trim();
         const voiceId = Storage.elevenLabsVoice?.trim() || "21m00Tcm4TlvDq8ikWAM";
 
@@ -308,7 +387,10 @@ const TTSProvider = (function() {
         }
 
         try {
-            Speech.setAssistantSpeaking(true);
+            // Only set speaking if not already speaking (avoid redundant calls)
+            if (!AppState.getFlag('assistantSpeaking')) {
+                Speech.setAssistantSpeaking(true);
+            }
 
             const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
                 method: "POST",
@@ -323,9 +405,14 @@ const TTSProvider = (function() {
                 })
             });
 
+            // Check if stopped while fetching
+            if (streamingStopped) {
+                onComplete?.();
+                return;
+            }
+
             if (!response.ok) {
                 UI.log("[elevenlabs-stream] error: " + response.status);
-                Speech.setAssistantSpeaking(false);
                 onComplete?.();
                 return;
             }
@@ -334,29 +421,46 @@ const TTSProvider = (function() {
             const audioUrl = URL.createObjectURL(audioBlob);
 
             const audio = new Audio(audioUrl);
+            activeStreamingAudio = audio;  // Track for stop()
+
             audio.onended = () => {
                 URL.revokeObjectURL(audioUrl);
-                Speech.setAssistantSpeaking(false);
-                onComplete?.();
+                activeStreamingAudio = null;
+                // Only call onComplete if not stopped (stop() handles state)
+                if (!streamingStopped) {
+                    onComplete?.();
+                }
             };
             audio.onerror = () => {
                 URL.revokeObjectURL(audioUrl);
-                Speech.setAssistantSpeaking(false);
-                onComplete?.();
+                activeStreamingAudio = null;
+                if (!streamingStopped) {
+                    onComplete?.();
+                }
             };
-            await audio.play();
+            await playWithLimiter(audio);
         } catch (e) {
             UI.log("[elevenlabs-stream] error: " + e.message);
-            Speech.setAssistantSpeaking(false);
-            onComplete?.();
+            if (!streamingStopped) {
+                onComplete?.();
+            }
         }
     };
 
     const speakWithLocalTTSStreaming = async (text, onComplete) => {
+        // Check if stopped before even starting
+        if (streamingStopped) {
+            onComplete?.();
+            return;
+        }
+
         const endpoint = Storage.localTtsEndpoint?.trim() || "http://localhost:5002/api/tts";
 
         try {
-            Speech.setAssistantSpeaking(true);
+            // Only set speaking if not already speaking (avoid redundant calls)
+            if (!AppState.getFlag('assistantSpeaking')) {
+                Speech.setAssistantSpeaking(true);
+            }
 
             const response = await fetch(endpoint, {
                 method: "POST",
@@ -364,9 +468,14 @@ const TTSProvider = (function() {
                 body: JSON.stringify({ text: text })
             });
 
+            // Check if stopped while fetching
+            if (streamingStopped) {
+                onComplete?.();
+                return;
+            }
+
             if (!response.ok) {
                 UI.log("[local-tts-stream] error: " + response.status);
-                Speech.setAssistantSpeaking(false);
                 onComplete?.();
                 return;
             }
@@ -375,34 +484,59 @@ const TTSProvider = (function() {
             const audioUrl = URL.createObjectURL(audioBlob);
 
             const audio = new Audio(audioUrl);
+            activeStreamingAudio = audio;  // Track for stop()
+
             audio.onended = () => {
                 URL.revokeObjectURL(audioUrl);
-                Speech.setAssistantSpeaking(false);
-                onComplete?.();
+                activeStreamingAudio = null;
+                // Only call onComplete if not stopped (stop() handles state)
+                if (!streamingStopped) {
+                    onComplete?.();
+                }
             };
             audio.onerror = () => {
                 URL.revokeObjectURL(audioUrl);
-                Speech.setAssistantSpeaking(false);
-                onComplete?.();
+                activeStreamingAudio = null;
+                if (!streamingStopped) {
+                    onComplete?.();
+                }
             };
-            await audio.play();
+            await playWithLimiter(audio);
         } catch (e) {
             UI.log("[local-tts-stream] error: " + e.message);
-            Speech.setAssistantSpeaking(false);
-            onComplete?.();
+            if (!streamingStopped) {
+                onComplete?.();
+            }
         }
     };
 
     const stop = () => {
+        // Set flag to prevent any streaming callbacks from continuing
+        streamingStopped = true;
+
         stopTTSWatchdogs();
         revokeCurrentAudioUrl();
+
+        // Stop non-streaming audio
         if (elevenLabsAudio) {
             elevenLabsAudio.pause();
             elevenLabsAudio = null;
         }
+
+        // Stop streaming audio
+        if (activeStreamingAudio) {
+            activeStreamingAudio.pause();
+            activeStreamingAudio = null;
+        }
+
         if ('speechSynthesis' in window) {
             window.speechSynthesis.cancel();
         }
+    };
+
+    // Reset the stopped flag (call this when starting new speech)
+    const resetStoppedFlag = () => {
+        streamingStopped = false;
     };
 
     const getProvider = () => {
@@ -425,6 +559,7 @@ const TTSProvider = (function() {
         speakWithElevenLabsStreaming,
         speakWithLocalTTSStreaming,
         stop,
+        resetStoppedFlag,
         getProvider,
         shouldUseSpeech,
         shouldUseOpenAIAudio

@@ -52,6 +52,7 @@ const App = (function() {
         const llmProvider = $("llmProvider");
         const localLlmEndpoint = $("localLlmEndpoint");
         const localLlmModel = $("localLlmModel");
+        const useDirectAudio = $("useDirectAudio");
 
         if (apiKey) apiKey.value = Storage.apiKey;
         if (model) model.value = Storage.model;
@@ -63,6 +64,7 @@ const App = (function() {
         if (llmProvider) llmProvider.value = Storage.llmProvider;
         if (localLlmEndpoint) localLlmEndpoint.value = Storage.localLlmEndpoint || "http://localhost:11434/api/generate";
         if (localLlmModel) localLlmModel.value = Storage.localLlmModel || "llama2";
+        if (useDirectAudio) useDirectAudio.checked = Storage.useDirectAudio;
 
         // Update provider field visibility
         UI.updateProviderFields();
@@ -107,6 +109,7 @@ const App = (function() {
                 Storage.llmProvider = llmProvider ? llmProvider.value : "openai";
                 Storage.localLlmEndpoint = localLlmEndpoint ? localLlmEndpoint.value.trim() : "";
                 Storage.localLlmModel = localLlmModel ? (localLlmModel.value.trim() || "llama2") : "llama2";
+                Storage.useDirectAudio = useDirectAudio ? useDirectAudio.checked : false;
                 UI.toast("saved");
 
                 // Brief visual feedback

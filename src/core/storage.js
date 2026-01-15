@@ -86,6 +86,12 @@ const Storage = (function() {
         },
         set localLlmModel(v) {
             safeSet("LOCAL_LLM_MODEL", v);
+        },
+        get useDirectAudio() {
+            return safeGet("USE_DIRECT_AUDIO", "false") === "true";
+        },
+        set useDirectAudio(v) {
+            safeSet("USE_DIRECT_AUDIO", v ? "true" : "false");
         }
     };
 
