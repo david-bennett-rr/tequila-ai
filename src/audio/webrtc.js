@@ -9,7 +9,7 @@ const WebRTC = (function() {
     let micMuted = false;    // Track microphone mute state
     const textBuf = Object.create(null);
     let responseIdCounter = 0;  // Counter for generating unique fallback IDs
-    const fallbackIdMap = Object.create(null);  // Maps missing response_ids to generated fallback IDs
+    let currentFallbackId = null;  // Current fallback ID for responses missing response_id
 
     // Streaming TTS state
     let streamingBuffer = "";           // Accumulates text for sentence detection
@@ -21,6 +21,8 @@ const WebRTC = (function() {
 
     // Get or create a consistent ID for a response
     // This ensures content_part.done and response.done use the same ID
+    // Note: All message handling runs on the same JS thread, so no true race condition,
+    // but we need to ensure consistent ID assignment across related messages
     const getResponseId = (msg) => {
         // Try to get ID from various places in the message
         // response.content_part.done has response_id at top level
@@ -30,25 +32,28 @@ const WebRTC = (function() {
         if (actualId) {
             // If we have an actual ID, check if we were using a fallback
             // and migrate the buffer to the real ID
-            if (fallbackIdMap._current && !textBuf[actualId] && textBuf[fallbackIdMap._current]) {
-                textBuf[actualId] = textBuf[fallbackIdMap._current];
-                delete textBuf[fallbackIdMap._current];
-                delete fallbackIdMap._current;
+            if (currentFallbackId && !textBuf[actualId] && textBuf[currentFallbackId]) {
+                textBuf[actualId] = textBuf[currentFallbackId];
+                delete textBuf[currentFallbackId];
+                UI.log("[id] migrated fallback " + currentFallbackId + " -> " + actualId);
             }
+            // Clear fallback since we now have real ID
+            currentFallbackId = null;
             return actualId;
         }
 
         // No ID found - use fallback system
-        // For content_part messages, create a new fallback if none exists for this "session"
-        if (!fallbackIdMap._current) {
-            fallbackIdMap._current = "_fallback_" + responseIdCounter++;
+        // Create a new fallback if none exists for this "session"
+        if (!currentFallbackId) {
+            currentFallbackId = "_fallback_" + responseIdCounter++;
+            UI.log("[id] created fallback: " + currentFallbackId);
         }
-        return fallbackIdMap._current;
+        return currentFallbackId;
     };
 
     // Clear the current fallback ID (called when response.done is received)
     const clearCurrentFallback = () => {
-        delete fallbackIdMap._current;
+        currentFallbackId = null;
     };
 
     // Mute/unmute microphone to prevent feedback when assistant speaks
@@ -149,8 +154,20 @@ const WebRTC = (function() {
 
     // Handle incoming text delta for streaming
     const handleTextDelta = (delta, responseId) => {
+        // Validate responseId - skip if it's a stale fallback from a previous response
+        // This can happen if messages arrive out of order during reconnection
+        if (!responseId) {
+            UI.log("[streaming] skipping delta with no responseId");
+            return;
+        }
+
         // New response - reset state
         if (streamingResponseId !== responseId) {
+            // Only reset if this looks like a genuinely new response
+            // (not just a late message from the current one)
+            if (streamingResponseId !== null) {
+                UI.log("[streaming] new response detected: " + responseId + " (was: " + streamingResponseId + ")");
+            }
             resetStreamingState();
             streamingResponseId = responseId;
             // Reset TTS stopped flag so new speech can play
@@ -382,6 +399,21 @@ const WebRTC = (function() {
         const API_KEY = Storage.apiKey.trim();
         const MODEL = Storage.model.trim();
         const VOICE = Storage.voice;
+
+        // Clean up any existing event listeners before reconnecting
+        // This prevents listener accumulation when connect() is called multiple times
+        if (unsubSpeakingStarted) {
+            unsubSpeakingStarted();
+            unsubSpeakingStarted = null;
+        }
+        if (unsubSpeakingStopped) {
+            unsubSpeakingStopped();
+            unsubSpeakingStopped = null;
+        }
+        if (unsubUserInterrupted) {
+            unsubUserInterrupted();
+            unsubUserInterrupted = null;
+        }
 
         // Mark that we want to stay connected (for kiosk auto-reconnect)
         AppState.setFlag('shouldBeConnected', true);
@@ -617,7 +649,15 @@ const WebRTC = (function() {
         // Listen for user interruptions to reset streaming TTS
         unsubUserInterrupted = Events.on(Events.EVENTS.USER_INTERRUPTED, () => {
             UI.log("[streaming] user interrupted - clearing queue");
+            // Reset streaming state first
             resetStreamingState();
+            // Ensure assistantSpeaking is cleared so UI returns to listening mode
+            // (Speech.setAssistantSpeaking is called by the speech module, but we need
+            // to ensure the streaming queue check doesn't leave us stuck)
+            if (AppState.getFlag('assistantSpeaking')) {
+                UI.log("[streaming] clearing stuck assistantSpeaking state after interruption");
+                Speech.setAssistantSpeaking(false);
+            }
         });
 
         // Only use browser Speech API if not in direct audio mode
@@ -763,7 +803,13 @@ const WebRTC = (function() {
                     // Always clear timeout to prevent leaks
                     clearTimeout(timeoutId);
                 }
-            })();
+            })().catch(e => {
+                // Catch any unhandled errors from the async IIFE to prevent unhandled rejection
+                UI.log("[local-llm] unexpected error: " + e.message);
+                Events.emit(Events.EVENTS.ERROR, { source: 'local-llm', error: e.message, unexpected: true });
+                UI.setTranscript("Listening...", "listening");
+                clearTimeout(timeoutId);
+            });
             return;
         }
 

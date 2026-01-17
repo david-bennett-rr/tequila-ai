@@ -6,6 +6,7 @@ const Speech = (function() {
     let finalTranscript = "";
     let recognitionBlocked = false;
     let retryCount = 0;
+    let pendingRetryTimer = null;  // Track pending retry to prevent race conditions
 
     // Store handler references for cleanup
     let handlers = {
@@ -124,7 +125,12 @@ const Speech = (function() {
 
             const delay = getRetryDelay();
             UI.log("[speech] scheduling retry in " + delay + "ms (attempt " + retryCount + "/" + Config.MAX_SPEECH_RETRY_ATTEMPTS + ")");
-            setTimeout(() => {
+            // Cancel any existing pending retry to prevent accumulation
+            if (pendingRetryTimer) {
+                clearTimeout(pendingRetryTimer);
+            }
+            pendingRetryTimer = setTimeout(() => {
+                pendingRetryTimer = null;
                 if (AppState.getFlag('shouldBeListening') &&
                     !AppState.getFlag('assistantSpeaking') &&
                     !AppState.getFlag('recognitionActive')) {
@@ -204,9 +210,15 @@ const Speech = (function() {
 
             // Auto-restart if we should be listening (even during assistant speech for interruption detection)
             if (AppState.getFlag('shouldBeListening')) {
+                // Skip if a retry is already pending (prevents race condition from rapid onend events)
+                if (pendingRetryTimer) {
+                    UI.log("[speech] auto-restart skipped - retry already pending");
+                    return;
+                }
                 const delay = getRetryDelay();
                 UI.log("[speech] auto-restarting in " + delay + "ms");
-                setTimeout(() => {
+                pendingRetryTimer = setTimeout(() => {
+                    pendingRetryTimer = null;
                     if (AppState.getFlag('shouldBeListening') &&
                         !AppState.getFlag('recognitionActive')) {
                         tryStartRecognition();
@@ -318,11 +330,17 @@ const Speech = (function() {
             const recoverableErrors = ['network', 'audio-capture', 'no-speech'];
             if (recoverableErrors.includes(event.error) &&
                 AppState.getFlag('shouldBeListening')) {
+                // Skip if a retry is already pending (prevents race condition)
+                if (pendingRetryTimer) {
+                    UI.log("[speech] error retry skipped - retry already pending");
+                    return;
+                }
                 // Recover even during assistant speech (for interruption detection)
                 retryCount++;
                 const delay = getRetryDelay();
                 UI.log("[speech] recoverable error, retrying in " + delay + "ms");
-                setTimeout(() => {
+                pendingRetryTimer = setTimeout(() => {
+                    pendingRetryTimer = null;
                     if (AppState.getFlag('shouldBeListening') &&
                         !AppState.getFlag('recognitionActive')) {
                         tryStartRecognition();
@@ -358,6 +376,10 @@ const Speech = (function() {
             if (silenceTimer) {
                 clearTimeout(silenceTimer);
                 silenceTimer = null;
+            }
+            if (pendingRetryTimer) {
+                clearTimeout(pendingRetryTimer);
+                pendingRetryTimer = null;
             }
             finalTranscript = "";
             retryCount = 0;
@@ -397,6 +419,10 @@ const Speech = (function() {
         if (silenceTimer) {
             clearTimeout(silenceTimer);
             silenceTimer = null;
+        }
+        if (pendingRetryTimer) {
+            clearTimeout(pendingRetryTimer);
+            pendingRetryTimer = null;
         }
         finalTranscript = "";
         AppState.setFlag('recognitionActive', false);

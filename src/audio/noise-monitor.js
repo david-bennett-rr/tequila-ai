@@ -22,6 +22,26 @@ const NoiseMonitor = (function() {
 
     const setup = async () => {
         try {
+            // Clean up any existing resources before creating new ones
+            // This prevents memory leaks if setup() is called multiple times
+            if (monitorInterval) {
+                clearInterval(monitorInterval);
+                monitorInterval = null;
+            }
+            if (microphone) {
+                try { microphone.disconnect(); } catch {}
+                microphone = null;
+            }
+            if (audioContext && audioContext.state !== 'closed') {
+                try { await audioContext.close(); } catch {}
+            }
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+            audioContext = null;
+            analyser = null;
+
             // Request microphone access
             stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
