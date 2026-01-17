@@ -61,9 +61,16 @@ const TTSProvider = (function() {
 
         // Only connect once per audio element (createMediaElementSource can only be called once)
         if (!connectedElements.has(audioElement)) {
-            const source = audioContext.createMediaElementSource(audioElement);
-            source.connect(compressor);
-            connectedElements.add(audioElement);
+            try {
+                const source = audioContext.createMediaElementSource(audioElement);
+                source.connect(compressor);
+                connectedElements.add(audioElement);
+            } catch (e) {
+                // Element may already be connected from a previous operation
+                // or audio context may be in invalid state - fall back to direct playback
+                UI.log("[audio] limiter connection failed, using direct playback: " + e.message);
+                return audioElement.play();
+            }
         }
 
         return audioElement.play();
@@ -223,8 +230,9 @@ const TTSProvider = (function() {
             // Start TTS timeout watchdog
             Watchdog.startTTSTimeout(() => {
                 revokeCurrentAudioUrl();
+                // Wrap pause in try-catch in case audio element is in invalid state
                 if (elevenLabsAudio) {
-                    elevenLabsAudio.pause();
+                    try { elevenLabsAudio.pause(); } catch {}
                 }
                 handleTTSError('elevenlabs', 'timeout exceeded');
             });
@@ -306,10 +314,13 @@ const TTSProvider = (function() {
             emitTTSStarted('local');
 
             // Start TTS timeout watchdog
+            // Note: We use a local reference to handle the case where elevenLabsAudio
+            // hasn't been created yet when timeout fires
             Watchdog.startTTSTimeout(() => {
                 revokeCurrentAudioUrl();
+                // elevenLabsAudio is shared across TTS providers - check before using
                 if (elevenLabsAudio) {
-                    elevenLabsAudio.pause();
+                    try { elevenLabsAudio.pause(); } catch {}
                 }
                 handleTTSError('local', 'timeout exceeded');
             });
@@ -389,7 +400,11 @@ const TTSProvider = (function() {
         try {
             // Only set speaking if not already speaking (avoid redundant calls)
             if (!AppState.getFlag('assistantSpeaking')) {
-                Speech.setAssistantSpeaking(true);
+                if (typeof Speech !== 'undefined' && Speech.setAssistantSpeaking) {
+                    Speech.setAssistantSpeaking(true);
+                } else {
+                    AppState.setFlag('assistantSpeaking', true);
+                }
             }
 
             const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
@@ -420,11 +435,20 @@ const TTSProvider = (function() {
             const audioBlob = await response.blob();
             const audioUrl = URL.createObjectURL(audioBlob);
 
+            // Track URL for cleanup in case of error
+            let urlRevoked = false;
+            const revokeUrl = () => {
+                if (!urlRevoked) {
+                    URL.revokeObjectURL(audioUrl);
+                    urlRevoked = true;
+                }
+            };
+
             const audio = new Audio(audioUrl);
             activeStreamingAudio = audio;  // Track for stop()
 
             audio.onended = () => {
-                URL.revokeObjectURL(audioUrl);
+                revokeUrl();
                 activeStreamingAudio = null;
                 // Only call onComplete if not stopped (stop() handles state)
                 if (!streamingStopped) {
@@ -432,13 +456,21 @@ const TTSProvider = (function() {
                 }
             };
             audio.onerror = () => {
-                URL.revokeObjectURL(audioUrl);
+                revokeUrl();
                 activeStreamingAudio = null;
                 if (!streamingStopped) {
                     onComplete?.();
                 }
             };
-            await playWithLimiter(audio);
+
+            try {
+                await playWithLimiter(audio);
+            } catch (playError) {
+                // Clean up URL if playback fails
+                revokeUrl();
+                activeStreamingAudio = null;
+                throw playError;  // Re-throw to be caught by outer catch
+            }
         } catch (e) {
             UI.log("[elevenlabs-stream] error: " + e.message);
             if (!streamingStopped) {
@@ -459,7 +491,11 @@ const TTSProvider = (function() {
         try {
             // Only set speaking if not already speaking (avoid redundant calls)
             if (!AppState.getFlag('assistantSpeaking')) {
-                Speech.setAssistantSpeaking(true);
+                if (typeof Speech !== 'undefined' && Speech.setAssistantSpeaking) {
+                    Speech.setAssistantSpeaking(true);
+                } else {
+                    AppState.setFlag('assistantSpeaking', true);
+                }
             }
 
             const response = await fetch(endpoint, {
@@ -483,11 +519,20 @@ const TTSProvider = (function() {
             const audioBlob = await response.blob();
             const audioUrl = URL.createObjectURL(audioBlob);
 
+            // Track URL for cleanup in case of error
+            let urlRevoked = false;
+            const revokeUrl = () => {
+                if (!urlRevoked) {
+                    URL.revokeObjectURL(audioUrl);
+                    urlRevoked = true;
+                }
+            };
+
             const audio = new Audio(audioUrl);
             activeStreamingAudio = audio;  // Track for stop()
 
             audio.onended = () => {
-                URL.revokeObjectURL(audioUrl);
+                revokeUrl();
                 activeStreamingAudio = null;
                 // Only call onComplete if not stopped (stop() handles state)
                 if (!streamingStopped) {
@@ -495,13 +540,21 @@ const TTSProvider = (function() {
                 }
             };
             audio.onerror = () => {
-                URL.revokeObjectURL(audioUrl);
+                revokeUrl();
                 activeStreamingAudio = null;
                 if (!streamingStopped) {
                     onComplete?.();
                 }
             };
-            await playWithLimiter(audio);
+
+            try {
+                await playWithLimiter(audio);
+            } catch (playError) {
+                // Clean up URL if playback fails
+                revokeUrl();
+                activeStreamingAudio = null;
+                throw playError;  // Re-throw to be caught by outer catch
+            }
         } catch (e) {
             UI.log("[local-tts-stream] error: " + e.message);
             if (!streamingStopped) {

@@ -110,12 +110,19 @@ const WebRTC = (function() {
 
     // Process next item in streaming queue
     const processStreamingQueue = () => {
+        // Early exit if queue is empty or already speaking
         if (isStreamingSpeaking || streamingQueue.length === 0) {
             // Queue empty and not speaking - check if response is complete
+            // Also verify Speech module exists before calling
             if (!isStreamingSpeaking && streamingQueue.length === 0 &&
                 streamingResponseComplete && AppState.getFlag('assistantSpeaking')) {
                 UI.log("[streaming] queue drained - assistant done speaking");
-                Speech.setAssistantSpeaking(false);
+                if (typeof Speech !== 'undefined' && Speech.setAssistantSpeaking) {
+                    Speech.setAssistantSpeaking(false);
+                } else {
+                    // Fallback: clear the flag directly if Speech module unavailable
+                    AppState.setFlag('assistantSpeaking', false);
+                }
                 streamingResponseComplete = false;  // Reset for next response
             }
             return;
@@ -127,6 +134,13 @@ const WebRTC = (function() {
         isStreamingSpeaking = true;
         const currentGen = streamingGeneration;  // Capture generation for callback validation
         UI.log("[streaming] speaking: " + sentence.substring(0, 50) + (sentence.length > 50 ? "..." : ""));
+
+        // Check TTSProvider module exists before calling
+        if (typeof TTSProvider === 'undefined') {
+            UI.log("[streaming] TTSProvider not available");
+            isStreamingSpeaking = false;
+            return;
+        }
 
         const provider = TTSProvider.getProvider();
 
@@ -142,10 +156,18 @@ const WebRTC = (function() {
         };
 
         // Use streaming-aware TTS that calls back when done
+        // Note: These are async functions but we don't await - they handle their own errors
+        // and call onComplete when done. We add .catch() to prevent unhandled rejections.
         if (provider === "elevenlabs") {
-            TTSProvider.speakWithElevenLabsStreaming(sentence, onComplete);
+            TTSProvider.speakWithElevenLabsStreaming(sentence, onComplete).catch(e => {
+                UI.log("[streaming] elevenlabs error: " + e.message);
+                onComplete();
+            });
         } else if (provider === "local") {
-            TTSProvider.speakWithLocalTTSStreaming(sentence, onComplete);
+            TTSProvider.speakWithLocalTTSStreaming(sentence, onComplete).catch(e => {
+                UI.log("[streaming] local TTS error: " + e.message);
+                onComplete();
+            });
         } else {
             // Fallback - no streaming callback support, use setTimeout to avoid stack overflow
             setTimeout(onComplete, 0);
@@ -396,8 +418,8 @@ const WebRTC = (function() {
 
     const connect = async () => {
         const llmProvider = Storage.llmProvider;
-        const API_KEY = Storage.apiKey.trim();
-        const MODEL = Storage.model.trim();
+        const API_KEY = (Storage.apiKey || "").trim();
+        const MODEL = (Storage.model || "").trim();
         const VOICE = Storage.voice;
 
         // Clean up any existing event listeners before reconnecting
@@ -656,7 +678,13 @@ const WebRTC = (function() {
             // to ensure the streaming queue check doesn't leave us stuck)
             if (AppState.getFlag('assistantSpeaking')) {
                 UI.log("[streaming] clearing stuck assistantSpeaking state after interruption");
-                Speech.setAssistantSpeaking(false);
+                // Check Speech module exists before calling
+                if (typeof Speech !== 'undefined' && Speech.setAssistantSpeaking) {
+                    Speech.setAssistantSpeaking(false);
+                } else {
+                    // Fallback: clear the flag directly
+                    AppState.setFlag('assistantSpeaking', false);
+                }
             }
         });
 
@@ -704,9 +732,19 @@ const WebRTC = (function() {
             ? conversationHistory.map(h => `${h.role === 'user' ? 'Guest' : 'You'}: ${h.content}`).join('\n') + '\n'
             : '';
 
-        const finalPrompt = isInstructModel
-            ? Prompts.buildInstructPrompt(text, Summary.summary, historyText)
-            : Prompts.buildBasePrompt(text, historyText);
+        // Get summary with null check for Summary module
+        const summary = typeof Summary !== 'undefined' ? Summary.summary : '';
+
+        // Build prompt with null check for Prompts module
+        let finalPrompt;
+        if (typeof Prompts !== 'undefined') {
+            finalPrompt = isInstructModel
+                ? Prompts.buildInstructPrompt(text, summary, historyText)
+                : Prompts.buildBasePrompt(text, historyText);
+        } else {
+            // Fallback if Prompts module unavailable
+            finalPrompt = historyText + 'Guest: ' + text + '\nYou:';
+        }
         if (llmProvider === "local") {
             // Add user message to history
             conversationHistory.push({ role: 'user', content: text });
@@ -747,7 +785,9 @@ const WebRTC = (function() {
                     const data = await res.json();
 
                     // Ollama returns { response: "..." }, other APIs might use { text: "..." }
-                    let assistantText = (data.response || data.text || data.content || "").trim();
+                    // Ensure we have a string before calling .trim()
+                    const rawResponse = data.response || data.text || data.content || "";
+                    let assistantText = (typeof rawResponse === 'string' ? rawResponse : String(rawResponse)).trim();
                     if (!assistantText) {
                         UI.log("[local-llm] empty response: " + JSON.stringify(data));
                         UI.setTranscript("Listening...", "listening");
@@ -814,7 +854,11 @@ const WebRTC = (function() {
         }
 
         // OpenAI uses its own prompt (always instruct-capable)
-        const openaiPrompt = Prompts.buildInstructPrompt(text, Summary.summary, '');
+        // Use null checks for Prompts and Summary modules
+        const openaiSummary = typeof Summary !== 'undefined' ? Summary.summary : '';
+        const openaiPrompt = typeof Prompts !== 'undefined'
+            ? Prompts.buildInstructPrompt(text, openaiSummary, '')
+            : text;  // Fallback to just the text if Prompts unavailable
 
         const messages = [
             {
@@ -853,9 +897,16 @@ const WebRTC = (function() {
         // Stop connection monitor watchdog
         Watchdog.stop(Watchdog.NAMES.CONNECTION_MONITOR);
 
-        Speech.stop();
-        AudioMonitor.stop();
-        TTSProvider.stop();
+        // Stop modules with null checks in case they failed to load
+        if (typeof Speech !== 'undefined' && Speech.stop) {
+            Speech.stop();
+        }
+        if (typeof AudioMonitor !== 'undefined' && AudioMonitor.stop) {
+            AudioMonitor.stop();
+        }
+        if (typeof TTSProvider !== 'undefined' && TTSProvider.stop) {
+            TTSProvider.stop();
+        }
 
         cleanupConnection();
         remoteAudio = null;

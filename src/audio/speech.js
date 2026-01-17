@@ -471,7 +471,9 @@ const Speech = (function() {
                 if (!AppState.getFlag('recognitionActive') && recognition) {
                     UI.log("[speech] restarting recognition after assistant finished");
                     setTimeout(() => {
-                        if (AppState.getFlag('shouldBeListening') &&
+                        // Verify recognition still exists (could be nullified by stop())
+                        if (recognition &&
+                            AppState.getFlag('shouldBeListening') &&
                             !AppState.getFlag('assistantSpeaking') &&
                             !AppState.getFlag('recognitionActive')) {
                             tryStartRecognition();

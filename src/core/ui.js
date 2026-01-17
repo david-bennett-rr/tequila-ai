@@ -5,10 +5,25 @@ const UI = (function() {
   let totalIn = 0;
   let totalOut = 0;
 
+  // Log rotation constants
+  const MAX_LOG_LINES = 500;  // Maximum lines to keep in log
+  const LOG_TRIM_AMOUNT = 100;  // Lines to remove when trimming
+
+  // Exchange history limit
+  const MAX_EXCHANGES = 50;  // Maximum exchanges to keep in DOM
+
   const log = (s) => {
     const logEl = $("log");
     if (logEl) {
       logEl.textContent += s + "\n";
+
+      // Log rotation: trim old entries when exceeding max
+      const lines = logEl.textContent.split("\n");
+      if (lines.length > MAX_LOG_LINES) {
+        // Remove oldest lines
+        logEl.textContent = lines.slice(LOG_TRIM_AMOUNT).join("\n");
+      }
+
       logEl.scrollTop = logEl.scrollHeight;
     }
   };
@@ -66,6 +81,15 @@ const UI = (function() {
 
     exWrap.prepend(row);
     exWrap.scrollTop = 0;
+
+    // Limit exchange history to prevent DOM growth
+    const exchanges = exWrap.querySelectorAll(".ex");
+    if (exchanges.length > MAX_EXCHANGES) {
+      // Remove oldest exchanges (at the end of the list since we prepend)
+      for (let i = exchanges.length - 1; i >= MAX_EXCHANGES; i--) {
+        exchanges[i].remove();
+      }
+    }
 
     totalIn += inS;
     totalOut += outS;

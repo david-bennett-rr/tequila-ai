@@ -72,6 +72,7 @@ const AudioMonitor = (function() {
 
     const start = () => {
         if (checkInterval) return;
+        if (!analyser) return;  // Validate analyser before accessing frequencyBinCount
 
         const dataArray = new Uint8Array(analyser.frequencyBinCount);
         let wasPlaying = false;
