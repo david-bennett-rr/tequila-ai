@@ -6,6 +6,7 @@ const NoiseMonitor = (function() {
     let microphone = null;
     let stream = null;
     let monitorInterval = null;
+    let isInitialized = false;  // Track if setup completed successfully
 
     // Noise tracking
     let noiseHistory = [];
@@ -61,9 +62,11 @@ const NoiseMonitor = (function() {
 
             // Start monitoring
             startMonitoring();
+            isInitialized = true;
             UI.log("[noise] monitor started, calibrating...");
 
         } catch (e) {
+            isInitialized = false;
             UI.log("[noise] setup failed: " + e.message);
             // Non-fatal - speech recognition will still work without noise monitoring
         }
@@ -263,6 +266,7 @@ const NoiseMonitor = (function() {
         }
         audioContext = null;
         analyser = null;
+        isInitialized = false;
     };
 
     return {
@@ -272,6 +276,7 @@ const NoiseMonitor = (function() {
         isLikelyNoise,
         getAdaptiveSettings,
         get ambientNoise() { return ambientNoiseLevel; },
-        get calibrating() { return isCalibrating; }
+        get calibrating() { return isCalibrating; },
+        get initialized() { return isInitialized; }
     };
 })();

@@ -3,6 +3,7 @@
 const Speech = (function() {
     let recognition = null;
     let silenceTimer = null;
+    let silenceTimerId = 0;  // Unique ID for each timer to detect stale callbacks
     let finalTranscript = "";
     let recognitionBlocked = false;
     let retryCount = 0;
@@ -288,7 +289,15 @@ const Speech = (function() {
                 // Capture confidence now, before setTimeout (event may be stale later)
                 const lastConfidence = event.results[event.results.length - 1]?.[0]?.confidence || 0.9;
 
+                // Increment timer ID to invalidate any previous timer callbacks
+                const currentTimerId = ++silenceTimerId;
+
                 silenceTimer = setTimeout(() => {
+                    // Check if this timer is still valid (not superseded by a newer one)
+                    if (currentTimerId !== silenceTimerId) {
+                        return;  // Stale timer callback, ignore
+                    }
+
                     const textToSend = finalTranscript.trim();
 
                     // Check if this looks like noise (if noise monitor available)

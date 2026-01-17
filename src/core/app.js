@@ -38,6 +38,16 @@ document.addEventListener("visibilitychange", () => {
 });
 
 const App = (function() {
+    // Validate Utils module exists before destructuring
+    if (typeof Utils === 'undefined' || !Utils.$) {
+        console.error("[app] CRITICAL: Utils module not loaded");
+        return {
+            init: () => {
+                console.error("[app] Cannot initialize - Utils module missing");
+            }
+        };
+    }
+
     const { $ } = Utils;
 
     const init = () => {

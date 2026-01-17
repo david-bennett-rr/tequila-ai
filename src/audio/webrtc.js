@@ -634,6 +634,17 @@ const WebRTC = (function() {
         const { client_secret } = await createSession.json();
         const token = client_secret?.value || client_secret;
 
+        // Validate token before proceeding
+        if (!token) {
+            UI.log("[err] session: no client_secret in response");
+            UI.toast("session failed - no token");
+            Events.emit(Events.EVENTS.CONNECTION_FAILED, { error: 'no client_secret in session response' });
+            if (AppState.getFlag('shouldBeConnected')) {
+                scheduleReconnect();
+            }
+            return;
+        }
+
         const sdpRes = await fetch("https://api.openai.com/v1/realtime?model=" + encodeURIComponent(MODEL), {
             method: "POST",
             headers: {
@@ -717,8 +728,15 @@ const WebRTC = (function() {
 
     const sendText = (text) => {
         if (!isConnected()) return;
+
+        // Validate Storage module exists
+        if (typeof Storage === 'undefined') {
+            UI.log("[err] Storage module not available");
+            return;
+        }
+
         const llmProvider = Storage.llmProvider;
-        const localLlmEndpoint = Storage.localLlmEndpoint.trim() || "http://localhost:11434/api/generate";
+        const localLlmEndpoint = (Storage.localLlmEndpoint || "").trim() || "http://localhost:11434/api/generate";
         const modalities = TTSProvider.shouldUseOpenAIAudio() ? ["audio", "text"] : ["text"];
         // Use chat format for instruct models, simpler format for base models
         const isInstructModel = (Storage.localLlmModel || "").toLowerCase().includes("instruct") ||
@@ -762,7 +780,8 @@ const WebRTC = (function() {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 120000);
 
-            (async () => {
+            // Wrap in Promise.resolve to ensure all errors (sync and async) are caught
+            Promise.resolve().then(async () => {
                 try {
                     const res = await fetch(localLlmEndpoint, {
                         method: "POST",
@@ -843,7 +862,7 @@ const WebRTC = (function() {
                     // Always clear timeout to prevent leaks
                     clearTimeout(timeoutId);
                 }
-            })().catch(e => {
+            }).catch(e => {
                 // Catch any unhandled errors from the async IIFE to prevent unhandled rejection
                 UI.log("[local-llm] unexpected error: " + e.message);
                 Events.emit(Events.EVENTS.ERROR, { source: 'local-llm', error: e.message, unexpected: true });
