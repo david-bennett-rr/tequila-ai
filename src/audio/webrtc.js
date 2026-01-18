@@ -440,16 +440,16 @@ const WebRTC = (function() {
             const inTok = usage.input_tokens ?? usage.input_token_details?.text_tokens ?? 0;
             const outTok = usage.output_tokens ?? usage.output_token_details?.text_tokens ?? 0;
 
-            // Log assistant response
-            if (assistantText) UI.log("[assistant] " + assistantText);
-            UI.addExchange("assistant", assistantText, inTok, outTok);
-
-            // Log pending user transcript AFTER assistant (prepend reverses order)
-            // So user will appear ABOVE assistant in the display
+            // Log pending user transcript FIRST (prepend means last-added appears on top)
+            // So assistant response will appear ABOVE user in the display
             if (pendingUserTranscript) {
                 UI.addExchange("user", pendingUserTranscript, 0, 0);
                 pendingUserTranscript = null;
             }
+
+            // Log assistant response AFTER user (will be prepended on top)
+            if (assistantText) UI.log("[assistant] " + assistantText);
+            UI.addExchange("assistant", assistantText, inTok, outTok);
 
             // Reset for next exchange
             currentResponseStarted = false;
@@ -811,6 +811,18 @@ const WebRTC = (function() {
         } else {
             UI.log("[sys] direct audio mode - skipping browser speech recognition");
             UI.setTranscript("Listening (direct audio)...", "listening");
+            // Set listening state and update button for direct audio mode
+            AppState.setFlag('shouldBeListening', true);
+            const btn = Utils.$("listen");
+            if (btn) {
+                btn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                    <line x1="12" y1="19" x2="12" y2="23"></line>
+                    <line x1="8" y1="23" x2="16" y2="23"></line>
+                </svg> Stop Listening`;
+                btn.classList.add("active");
+            }
             // Note: We don't mute the mic during assistant speech in direct audio mode
             // OpenAI's server VAD will detect user interruptions automatically
             // The echo cancellation in getUserMedia should handle feedback
@@ -1001,8 +1013,10 @@ const WebRTC = (function() {
         AppState.setFlag('shouldBeConnected', false);
         reconnectAttempts = 0;
 
-        // Clear conversation history for fresh start
+        // Clear conversation history and pending state for fresh start
         conversationHistory = [];
+        pendingUserTranscript = null;
+        currentResponseStarted = false;
 
         // Clear any pending reconnect
         if (reconnectTimer) {

@@ -131,7 +131,6 @@ const Speech = (function() {
             pendingRetryTimer = setTimeout(() => {
                 pendingRetryTimer = null;
                 if (AppState.getFlag('shouldBeListening') &&
-                    !AppState.getFlag('assistantSpeaking') &&
                     !AppState.getFlag('recognitionActive')) {
                     tryStartRecognition();
                 }
@@ -360,6 +359,33 @@ const Speech = (function() {
     };
 
     const toggle = () => {
+        // In direct audio mode, toggle mic muting instead of browser speech recognition
+        if (Storage.useDirectAudio && typeof WebRTC !== 'undefined') {
+            // Must be connected to toggle mic in direct audio mode
+            if (!AppState.isConnected()) {
+                UI.log("[speech] direct audio: cannot toggle - not connected");
+                return;
+            }
+            const isListening = AppState.getFlag('shouldBeListening');
+            if (isListening) {
+                // Stop listening - mute the mic
+                AppState.setFlag('shouldBeListening', false);
+                WebRTC.setMicMuted(true);
+                updateButtonToStart();
+                UI.setTranscript("Microphone muted", "waiting");
+                UI.log("[speech] direct audio: mic muted");
+            } else {
+                // Start listening - unmute the mic
+                AppState.setFlag('shouldBeListening', true);
+                WebRTC.setMicMuted(false);
+                updateButtonToStop();
+                UI.setTranscript("Listening (direct audio)...", "listening");
+                UI.log("[speech] direct audio: mic unmuted");
+            }
+            return;
+        }
+
+        // Standard browser speech recognition mode
         if (!recognition) {
             if (!init()) return;
         }
