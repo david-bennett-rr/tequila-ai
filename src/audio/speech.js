@@ -67,7 +67,7 @@ const Speech = (function() {
 
     // Calculate retry delay with exponential backoff
     const getRetryDelay = () => {
-        return Math.min(Config.BASE_RETRY_DELAY * Math.pow(2, retryCount), Config.MAX_RETRY_DELAY);
+        return Utils.backoffDelay(retryCount, Config.BASE_RETRY_DELAY, Config.MAX_RETRY_DELAY);
     };
 
     // Attempt to start recognition with retry logic
@@ -127,9 +127,7 @@ const Speech = (function() {
             const delay = getRetryDelay();
             UI.log("[speech] scheduling retry in " + delay + "ms (attempt " + retryCount + "/" + Config.MAX_SPEECH_RETRY_ATTEMPTS + ")");
             // Cancel any existing pending retry to prevent accumulation
-            if (pendingRetryTimer) {
-                clearTimeout(pendingRetryTimer);
-            }
+            pendingRetryTimer = Utils.clearTimer(pendingRetryTimer);
             pendingRetryTimer = setTimeout(() => {
                 pendingRetryTimer = null;
                 if (AppState.getFlag('shouldBeListening') &&
@@ -204,10 +202,7 @@ const Speech = (function() {
             UI.log("[speech] recognition ended");
             Events.emit(Events.EVENTS.LISTENING_STOPPED);
 
-            if (silenceTimer) {
-                clearTimeout(silenceTimer);
-                silenceTimer = null;
-            }
+            silenceTimer = Utils.clearTimer(silenceTimer);
 
             // Auto-restart if we should be listening (even during assistant speech for interruption detection)
             if (AppState.getFlag('shouldBeListening')) {
@@ -272,10 +267,7 @@ const Speech = (function() {
             UI.setTranscript(displayText);
             Events.emit(Events.EVENTS.TRANSCRIPT_UPDATE, { text: displayText, isFinal: !!currentFinal });
 
-            if (silenceTimer) {
-                clearTimeout(silenceTimer);
-                silenceTimer = null;
-            }
+            silenceTimer = Utils.clearTimer(silenceTimer);
 
             const trimmedTranscript = finalTranscript.trim();
             const wordCount = trimmedTranscript.split(/\s+/).filter(w => w.length > 0).length;
@@ -382,14 +374,8 @@ const Speech = (function() {
             if (AppState.getFlag('recognitionActive')) {
                 recognition.stop();
             }
-            if (silenceTimer) {
-                clearTimeout(silenceTimer);
-                silenceTimer = null;
-            }
-            if (pendingRetryTimer) {
-                clearTimeout(pendingRetryTimer);
-                pendingRetryTimer = null;
-            }
+            silenceTimer = Utils.clearTimer(silenceTimer);
+            pendingRetryTimer = Utils.clearTimer(pendingRetryTimer);
             finalTranscript = "";
             retryCount = 0;
         } else {
@@ -425,14 +411,8 @@ const Speech = (function() {
             recognitionBlocked = true;
             recognition.stop();
         }
-        if (silenceTimer) {
-            clearTimeout(silenceTimer);
-            silenceTimer = null;
-        }
-        if (pendingRetryTimer) {
-            clearTimeout(pendingRetryTimer);
-            pendingRetryTimer = null;
-        }
+        silenceTimer = Utils.clearTimer(silenceTimer);
+        pendingRetryTimer = Utils.clearTimer(pendingRetryTimer);
         finalTranscript = "";
         AppState.setFlag('recognitionActive', false);
         recognitionBlocked = false;
@@ -456,16 +436,19 @@ const Speech = (function() {
                 AppState.transition(AppState.STATES.SPEAKING, 'assistant speaking');
             }
 
-            // Mute mic if listenWhileSpeaking is OFF
-            if (!Storage.listenWhileSpeaking && typeof WebRTC !== 'undefined' && WebRTC.setMicMuted) {
-                WebRTC.setMicMuted(true);
-                UI.log("[speech] mic muted (listenWhileSpeaking=off)");
+            // Mute mic/stop recognition if listenWhileSpeaking is OFF
+            if (!Storage.listenWhileSpeaking) {
+                // Try to mute WebRTC mic (for direct audio mode)
+                Utils.safeCall(WebRTC, 'setMicMuted', true);
+                // Also stop speech recognition (for non-direct audio mode)
+                if (recognition && AppState.getFlag('recognitionActive')) {
+                    UI.log("[speech] stopping recognition while assistant speaks");
+                    recognitionBlocked = true;
+                    try { recognition.stop(); } catch (e) {}
+                }
             }
 
-            if (silenceTimer) {
-                clearTimeout(silenceTimer);
-                silenceTimer = null;
-            }
+            silenceTimer = Utils.clearTimer(silenceTimer);
             finalTranscript = "";
             UI.setTranscript("Assistant is speaking...", "waiting");
 
@@ -473,11 +456,11 @@ const Speech = (function() {
             UI.log("[speech] assistant stopped speaking");
             Events.emit(Events.EVENTS.ASSISTANT_SPEAKING_STOPPED);
 
-            // Unmute mic if it was muted
-            if (!Storage.listenWhileSpeaking && typeof WebRTC !== 'undefined' && WebRTC.setMicMuted) {
-                WebRTC.setMicMuted(false);
-                UI.log("[speech] mic unmuted");
+            // Unmute mic if it was muted (for direct audio mode)
+            if (!Storage.listenWhileSpeaking) {
+                Utils.safeCall(WebRTC, 'setMicMuted', false);
             }
+            // Recognition restart is handled below in the shouldBeListening block
 
             finalTranscript = "";
             retryCount = 0;
@@ -489,6 +472,8 @@ const Speech = (function() {
                     AppState.transition(AppState.STATES.LISTENING, 'assistant finished');
                 }
 
+                // Clear blocked state and restart recognition if needed
+                recognitionBlocked = false;
                 if (!AppState.getFlag('recognitionActive') && recognition) {
                     UI.log("[speech] restarting recognition after assistant finished");
                     setTimeout(() => {
@@ -499,7 +484,7 @@ const Speech = (function() {
                             !AppState.getFlag('recognitionActive')) {
                             tryStartRecognition();
                         }
-                    }, 500);
+                    }, 300);  // Shorter delay for quicker restart
                 }
             } else {
                 UI.setTranscript("Click to start listening...");

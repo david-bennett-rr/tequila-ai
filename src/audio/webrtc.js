@@ -59,12 +59,16 @@ const WebRTC = (function() {
 
     // Mute/unmute microphone to prevent feedback when assistant speaks
     const setMicMuted = (muted) => {
-        if (!localStream) return;
+        if (!localStream) {
+            UI.log("[mic] cannot " + (muted ? "mute" : "unmute") + " - no localStream (not in direct audio mode?)");
+            return;
+        }
         micMuted = muted;
-        localStream.getAudioTracks().forEach(track => {
+        const tracks = localStream.getAudioTracks();
+        tracks.forEach(track => {
             track.enabled = !muted;
         });
-        UI.log("[mic] " + (muted ? "muted" : "unmuted"));
+        UI.log("[mic] " + (muted ? "muted" : "unmuted") + " (" + tracks.length + " tracks)");
     };
 
     // Event unsubscribe functions for cleanup
@@ -94,10 +98,7 @@ const WebRTC = (function() {
         processingQueueLock = false;  // Release lock on reset
 
         // Clear any pending deadlock prevention timeout
-        if (processingQueueTimeoutId) {
-            clearTimeout(processingQueueTimeoutId);
-            processingQueueTimeoutId = null;
-        }
+        processingQueueTimeoutId = Utils.clearTimer(processingQueueTimeoutId);
 
         // NOTE: We intentionally do NOT call TTSProvider.resetStoppedFlag() here.
         // The stopped flag should only be reset when we're ready to start NEW speech
@@ -185,17 +186,12 @@ const WebRTC = (function() {
             completeCalled = true;
 
             // Clear the deadlock prevention timeout
-            if (processingQueueTimeoutId) {
-                clearTimeout(processingQueueTimeoutId);
-                processingQueueTimeoutId = null;
-            }
+            processingQueueTimeoutId = Utils.clearTimer(processingQueueTimeoutId);
 
             // Ignore callback if generation changed (new response started)
             if (currentGen !== streamingGeneration) {
                 UI.log("[streaming] ignoring stale callback (gen " + currentGen + " vs " + streamingGeneration + ")");
                 // CRITICAL: Still release lock for stale callbacks to prevent deadlock
-                // The new generation's resetStreamingState() should have already reset the lock,
-                // but we do it again defensively
                 processingQueueLock = false;
                 return;
             }
@@ -210,9 +206,7 @@ const WebRTC = (function() {
             if (!completeCalled) {
                 UI.log("[streaming] TIMEOUT: TTS callback did not fire in " + STREAMING_TTS_TIMEOUT + "ms, forcing lock release");
                 // Stop any potentially stuck audio
-                if (typeof TTSProvider !== 'undefined' && TTSProvider.stop) {
-                    TTSProvider.stop();
-                }
+                Utils.safeCall(TTSProvider, 'stop');
                 onComplete();  // This will release the lock and continue processing
             }
         }, STREAMING_TTS_TIMEOUT);
@@ -310,7 +304,7 @@ const WebRTC = (function() {
     let reconnectTimer = null;
 
     const getReconnectDelay = () => {
-        return Math.min(Config.BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts), Config.MAX_RECONNECT_DELAY);
+        return Utils.backoffDelay(reconnectAttempts, Config.BASE_RECONNECT_DELAY, Config.MAX_RECONNECT_DELAY);
     };
 
     const scheduleReconnect = () => {
@@ -493,10 +487,8 @@ const WebRTC = (function() {
         try {
             try { dataChannel?.close(); } catch {}
             try { pc?.close(); } catch {}
-            if (localStream) {
-                localStream.getTracks().forEach(track => track.stop());
-                localStream = null;
-            }
+            Utils.stopMediaStream(localStream);
+            localStream = null;
 
             // Clean up streaming state to prevent orphaned timeouts
             resetStreamingState();
@@ -919,9 +911,7 @@ const WebRTC = (function() {
                     const data = await res.json();
 
                     // Ollama returns { response: "..." }, other APIs might use { text: "..." }
-                    // Ensure we have a string before calling .trim()
-                    const rawResponse = data.response || data.text || data.content || "";
-                    let assistantText = (typeof rawResponse === 'string' ? rawResponse : String(rawResponse)).trim();
+                    let assistantText = Utils.extractText(data);
                     if (!assistantText) {
                         UI.log("[local-llm] empty response: " + JSON.stringify(data));
                         UI.setTranscript("Listening...", "listening");
@@ -937,9 +927,7 @@ const WebRTC = (function() {
                     conversationHistory.push({ role: 'assistant', content: assistantText });
 
                     // Trim history to max size
-                    while (conversationHistory.length > MAX_HISTORY) {
-                        conversationHistory.shift();
-                    }
+                    Utils.trimArray(conversationHistory, MAX_HISTORY);
 
                     UI.log("[assistant] " + assistantText);
                     UI.addExchange("assistant", assistantText, 0, 0);

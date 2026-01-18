@@ -103,13 +103,13 @@ const App = (function() {
             // Set current selection
             if (currentName && names.includes(currentName)) {
                 personaSelect.value = currentName;
-                if (personaNameRow) personaNameRow.style.display = "none";
+                Utils.setDisplay(personaNameRow, false);
                 // Load current persona data
                 const persona = Storage.getCurrentPersona();
                 if (personaRole) personaRole.value = persona.role || "";
             } else {
                 personaSelect.value = "";
-                if (personaNameRow) personaNameRow.style.display = "flex";
+                Utils.setDisplay(personaNameRow, true);
             }
         };
         populatePersonaDropdown();
@@ -119,12 +119,12 @@ const App = (function() {
             personaSelect.addEventListener("change", () => {
                 if (personaSelect.value === "") {
                     // Creating new persona
-                    if (personaNameRow) personaNameRow.style.display = "flex";
+                    Utils.setDisplay(personaNameRow, true);
                     if (personaName) personaName.value = "";
                     if (personaRole) personaRole.value = "";
                 } else {
                     // Selected existing persona
-                    if (personaNameRow) personaNameRow.style.display = "none";
+                    Utils.setDisplay(personaNameRow, false);
                     const library = Storage.personaLibrary;
                     const persona = library[personaSelect.value];
                     if (persona && personaRole) {
@@ -154,12 +154,12 @@ const App = (function() {
             // Set current value if it exists in history
             if (currentValue && history.includes(currentValue)) {
                 elevenLabsVoiceSelect.value = currentValue;
-                if (elevenLabsVoiceNewRow) elevenLabsVoiceNewRow.style.display = "none";
+                Utils.setDisplay(elevenLabsVoiceNewRow, false);
             } else if (currentValue) {
                 // Current value not in history - show in text input
                 elevenLabsVoiceSelect.value = "";
                 if (elevenLabsVoice) elevenLabsVoice.value = currentValue;
-                if (elevenLabsVoiceNewRow) elevenLabsVoiceNewRow.style.display = "flex";
+                Utils.setDisplay(elevenLabsVoiceNewRow, true);
             }
         };
         populateVoiceHistory();
@@ -169,11 +169,11 @@ const App = (function() {
             elevenLabsVoiceSelect.addEventListener("change", () => {
                 if (elevenLabsVoiceSelect.value === "") {
                     // User wants to enter a new voice ID
-                    if (elevenLabsVoiceNewRow) elevenLabsVoiceNewRow.style.display = "flex";
+                    Utils.setDisplay(elevenLabsVoiceNewRow, true);
                     if (elevenLabsVoice) elevenLabsVoice.value = "";
                 } else {
                     // User selected an existing voice
-                    if (elevenLabsVoiceNewRow) elevenLabsVoiceNewRow.style.display = "none";
+                    Utils.setDisplay(elevenLabsVoiceNewRow, false);
                 }
             });
         }

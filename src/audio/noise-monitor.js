@@ -36,10 +36,8 @@ const NoiseMonitor = (function() {
             if (audioContext && audioContext.state !== 'closed') {
                 try { await audioContext.close(); } catch {}
             }
-            if (stream) {
-                stream.getTracks().forEach(track => track.stop());
-                stream = null;
-            }
+            Utils.stopMediaStream(stream);
+            stream = null;
             audioContext = null;
             analyser = null;
 
@@ -260,10 +258,8 @@ const NoiseMonitor = (function() {
         if (audioContext && audioContext.state !== 'closed') {
             try { audioContext.close(); } catch {}
         }
-        if (stream) {
-            stream.getTracks().forEach(track => track.stop());
-            stream = null;
-        }
+        Utils.stopMediaStream(stream);
+        stream = null;
         audioContext = null;
         analyser = null;
         isInitialized = false;
