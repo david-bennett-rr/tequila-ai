@@ -102,10 +102,14 @@ const TTSProvider = (function() {
             elevenLabsAudio.currentTime = 0;
         }
 
-        // Stop active streaming audio
+        // Stop active streaming audio and revoke its URL to prevent memory leak
         if (activeStreamingAudio) {
             try { activeStreamingAudio.pause(); } catch {}
             activeStreamingAudio = null;
+        }
+        if (activeStreamingAudioUrl) {
+            URL.revokeObjectURL(activeStreamingAudioUrl);
+            activeStreamingAudioUrl = null;
         }
 
         // Stop all tracked audio elements
@@ -434,6 +438,10 @@ const TTSProvider = (function() {
     // ============= Streaming TTS Functions =============
     // These accept a callback that fires when playback completes
 
+    // Streaming TTS timeout constant (per-chunk timeout)
+    const STREAMING_TTS_FETCH_TIMEOUT = 15000;  // 15 seconds for API fetch
+    const STREAMING_TTS_PLAYBACK_TIMEOUT = 30000;  // 30 seconds for audio playback
+
     const speakWithElevenLabsStreaming = async (text, onComplete) => {
         // Check if stopped before even starting
         if (streamingStopped) {
@@ -449,6 +457,10 @@ const TTSProvider = (function() {
             onComplete?.();
             return;
         }
+
+        // Create AbortController for fetch timeout
+        const controller = new AbortController();
+        const fetchTimeoutId = setTimeout(() => controller.abort(), STREAMING_TTS_FETCH_TIMEOUT);
 
         try {
             // Only set speaking if not already speaking (avoid redundant calls)
@@ -470,8 +482,12 @@ const TTSProvider = (function() {
                     text: text,
                     model_id: "eleven_turbo_v2_5",
                     voice_settings: { stability: 0.5, similarity_boost: 0.75 }
-                })
+                }),
+                signal: controller.signal
             });
+
+            // Clear fetch timeout after successful response
+            clearTimeout(fetchTimeoutId);
 
             // Check if stopped while fetching
             if (streamingStopped) {
@@ -488,7 +504,7 @@ const TTSProvider = (function() {
             const audioBlob = await response.blob();
             const audioUrl = URL.createObjectURL(audioBlob);
 
-            // Track URL for cleanup in case of error
+            // Track URL for cleanup in case of error - defined early so outer catch can use it
             let urlRevoked = false;
             const revokeUrl = () => {
                 if (!urlRevoked) {
@@ -497,12 +513,32 @@ const TTSProvider = (function() {
                 }
             };
 
-            const audio = new Audio(audioUrl);
+            let audio;
+            try {
+                audio = new Audio(audioUrl);
+            } catch (audioError) {
+                revokeUrl();  // Clean up URL if Audio constructor fails
+                throw audioError;
+            }
             activeStreamingAudio = audio;  // Track for stop()
             activeStreamingAudioUrl = audioUrl;  // Track URL for cleanup on stop()
             trackAudioElement(audio);      // Track in global set for comprehensive cleanup
 
+            // Set up playback timeout to prevent stuck audio
+            let playbackTimeoutId = null;
+            let playbackCompleted = false;
+
+            const cleanupPlayback = () => {
+                if (playbackTimeoutId) {
+                    clearTimeout(playbackTimeoutId);
+                    playbackTimeoutId = null;
+                }
+            };
+
             audio.onended = () => {
+                if (playbackCompleted) return;
+                playbackCompleted = true;
+                cleanupPlayback();
                 revokeUrl();
                 if (activeStreamingAudio === audio) {
                     activeStreamingAudio = null;
@@ -514,6 +550,9 @@ const TTSProvider = (function() {
                 }
             };
             audio.onerror = () => {
+                if (playbackCompleted) return;
+                playbackCompleted = true;
+                cleanupPlayback();
                 revokeUrl();
                 if (activeStreamingAudio === audio) {
                     activeStreamingAudio = null;
@@ -524,10 +563,28 @@ const TTSProvider = (function() {
                 }
             };
 
+            // Start playback timeout
+            playbackTimeoutId = setTimeout(() => {
+                if (!playbackCompleted) {
+                    UI.log("[elevenlabs-stream] playback timeout - forcing completion");
+                    playbackCompleted = true;
+                    try { audio.pause(); } catch {}
+                    revokeUrl();
+                    if (activeStreamingAudio === audio) {
+                        activeStreamingAudio = null;
+                        activeStreamingAudioUrl = null;
+                    }
+                    if (!streamingStopped) {
+                        onComplete?.();
+                    }
+                }
+            }, STREAMING_TTS_PLAYBACK_TIMEOUT);
+
             try {
                 await playWithLimiter(audio);
             } catch (playError) {
                 // Clean up URL if playback fails
+                cleanupPlayback();
                 revokeUrl();
                 if (activeStreamingAudio === audio) {
                     activeStreamingAudio = null;
@@ -536,7 +593,10 @@ const TTSProvider = (function() {
                 throw playError;  // Re-throw to be caught by outer catch
             }
         } catch (e) {
-            UI.log("[elevenlabs-stream] error: " + e.message);
+            // Clear fetch timeout on error
+            clearTimeout(fetchTimeoutId);
+            const errorMsg = e.name === 'AbortError' ? 'fetch timeout' : e.message;
+            UI.log("[elevenlabs-stream] error: " + errorMsg);
             if (!streamingStopped) {
                 onComplete?.();
             }
@@ -552,6 +612,10 @@ const TTSProvider = (function() {
 
         const endpoint = Storage.localTtsEndpoint?.trim() || "http://localhost:5002/api/tts";
 
+        // Create AbortController for fetch timeout
+        const controller = new AbortController();
+        const fetchTimeoutId = setTimeout(() => controller.abort(), STREAMING_TTS_FETCH_TIMEOUT);
+
         try {
             // Only set speaking if not already speaking (avoid redundant calls)
             if (!AppState.getFlag('assistantSpeaking')) {
@@ -565,8 +629,12 @@ const TTSProvider = (function() {
             const response = await fetch(endpoint, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ text: text })
+                body: JSON.stringify({ text: text }),
+                signal: controller.signal
             });
+
+            // Clear fetch timeout after successful response
+            clearTimeout(fetchTimeoutId);
 
             // Check if stopped while fetching
             if (streamingStopped) {
@@ -583,7 +651,7 @@ const TTSProvider = (function() {
             const audioBlob = await response.blob();
             const audioUrl = URL.createObjectURL(audioBlob);
 
-            // Track URL for cleanup in case of error
+            // Track URL for cleanup in case of error - defined early so outer catch can use it
             let urlRevoked = false;
             const revokeUrl = () => {
                 if (!urlRevoked) {
@@ -592,12 +660,32 @@ const TTSProvider = (function() {
                 }
             };
 
-            const audio = new Audio(audioUrl);
+            let audio;
+            try {
+                audio = new Audio(audioUrl);
+            } catch (audioError) {
+                revokeUrl();  // Clean up URL if Audio constructor fails
+                throw audioError;
+            }
             activeStreamingAudio = audio;  // Track for stop()
             activeStreamingAudioUrl = audioUrl;  // Track URL for cleanup on stop()
             trackAudioElement(audio);      // Track in global set for comprehensive cleanup
 
+            // Set up playback timeout to prevent stuck audio
+            let playbackTimeoutId = null;
+            let playbackCompleted = false;
+
+            const cleanupPlayback = () => {
+                if (playbackTimeoutId) {
+                    clearTimeout(playbackTimeoutId);
+                    playbackTimeoutId = null;
+                }
+            };
+
             audio.onended = () => {
+                if (playbackCompleted) return;
+                playbackCompleted = true;
+                cleanupPlayback();
                 revokeUrl();
                 if (activeStreamingAudio === audio) {
                     activeStreamingAudio = null;
@@ -609,6 +697,9 @@ const TTSProvider = (function() {
                 }
             };
             audio.onerror = () => {
+                if (playbackCompleted) return;
+                playbackCompleted = true;
+                cleanupPlayback();
                 revokeUrl();
                 if (activeStreamingAudio === audio) {
                     activeStreamingAudio = null;
@@ -619,10 +710,28 @@ const TTSProvider = (function() {
                 }
             };
 
+            // Start playback timeout
+            playbackTimeoutId = setTimeout(() => {
+                if (!playbackCompleted) {
+                    UI.log("[local-tts-stream] playback timeout - forcing completion");
+                    playbackCompleted = true;
+                    try { audio.pause(); } catch {}
+                    revokeUrl();
+                    if (activeStreamingAudio === audio) {
+                        activeStreamingAudio = null;
+                        activeStreamingAudioUrl = null;
+                    }
+                    if (!streamingStopped) {
+                        onComplete?.();
+                    }
+                }
+            }, STREAMING_TTS_PLAYBACK_TIMEOUT);
+
             try {
                 await playWithLimiter(audio);
             } catch (playError) {
                 // Clean up URL if playback fails
+                cleanupPlayback();
                 revokeUrl();
                 if (activeStreamingAudio === audio) {
                     activeStreamingAudio = null;
@@ -631,7 +740,10 @@ const TTSProvider = (function() {
                 throw playError;  // Re-throw to be caught by outer catch
             }
         } catch (e) {
-            UI.log("[local-tts-stream] error: " + e.message);
+            // Clear fetch timeout on error
+            clearTimeout(fetchTimeoutId);
+            const errorMsg = e.name === 'AbortError' ? 'fetch timeout' : e.message;
+            UI.log("[local-tts-stream] error: " + errorMsg);
             if (!streamingStopped) {
                 onComplete?.();
             }
@@ -647,12 +759,16 @@ const TTSProvider = (function() {
 
         // Revoke streaming audio URL to prevent memory leak
         // (onended won't fire since we're pausing, not ending naturally)
+        // NOTE: We null out the URL BEFORE calling stopAllAudio to prevent double-revoke
+        // since stopAllAudio also checks activeStreamingAudioUrl
         if (activeStreamingAudioUrl) {
-            URL.revokeObjectURL(activeStreamingAudioUrl);
-            activeStreamingAudioUrl = null;
+            const urlToRevoke = activeStreamingAudioUrl;
+            activeStreamingAudioUrl = null;  // Clear first to prevent stopAllAudio from revoking again
+            URL.revokeObjectURL(urlToRevoke);
         }
 
         // Use comprehensive audio stop to ensure ALL audio sources are stopped
+        // Note: activeStreamingAudioUrl is already null, so stopAllAudio won't double-revoke
         stopAllAudio();
 
         // Also null out our references (stopAllAudio pauses but doesn't null these)

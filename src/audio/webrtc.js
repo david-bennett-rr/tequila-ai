@@ -77,7 +77,13 @@ const WebRTC = (function() {
 
     // ============= Streaming TTS Functions =============
 
+    // Timeout for deadlock prevention in streaming queue
+    let processingQueueTimeoutId = null;
+    const STREAMING_TTS_TIMEOUT = 30000;  // 30 second timeout for each TTS chunk
+
     // Reset streaming state for new response
+    // Note: Does NOT reset TTSProvider.streamingStopped - that's controlled separately
+    // to prevent in-flight requests from playing after a stop command
     const resetStreamingState = () => {
         streamingBuffer = "";
         streamingQueue = [];
@@ -87,10 +93,15 @@ const WebRTC = (function() {
         streamingResponseComplete = false;
         processingQueueLock = false;  // Release lock on reset
 
-        // Reset TTS stopped flag so new speech can play
-        if (typeof TTSProvider !== 'undefined' && TTSProvider.resetStoppedFlag) {
-            TTSProvider.resetStoppedFlag();
+        // Clear any pending deadlock prevention timeout
+        if (processingQueueTimeoutId) {
+            clearTimeout(processingQueueTimeoutId);
+            processingQueueTimeoutId = null;
         }
+
+        // NOTE: We intentionally do NOT call TTSProvider.resetStoppedFlag() here.
+        // The stopped flag should only be reset when we're ready to start NEW speech
+        // (in handleTextDelta when a new responseId arrives), not when stopping.
     };
 
     // Extract complete sentences from buffer, return { sentences: [], remaining: "" }
@@ -163,9 +174,22 @@ const WebRTC = (function() {
 
         const provider = TTSProvider.getProvider();
 
+        // Track if onComplete has been called to prevent double-execution
+        let completeCalled = false;
+
         // Callback that validates generation before continuing
         // NOTE: Lock is held until this callback fires to prevent race conditions
         const onComplete = () => {
+            // Prevent double-execution from both timeout and normal completion
+            if (completeCalled) return;
+            completeCalled = true;
+
+            // Clear the deadlock prevention timeout
+            if (processingQueueTimeoutId) {
+                clearTimeout(processingQueueTimeoutId);
+                processingQueueTimeoutId = null;
+            }
+
             // Ignore callback if generation changed (new response started)
             if (currentGen !== streamingGeneration) {
                 UI.log("[streaming] ignoring stale callback (gen " + currentGen + " vs " + streamingGeneration + ")");
@@ -179,6 +203,19 @@ const WebRTC = (function() {
             processingQueueLock = false;  // Release lock before recursive call
             processStreamingQueue();
         };
+
+        // Set up deadlock prevention timeout
+        // If onComplete doesn't fire within timeout, force release the lock
+        processingQueueTimeoutId = setTimeout(() => {
+            if (!completeCalled) {
+                UI.log("[streaming] TIMEOUT: TTS callback did not fire in " + STREAMING_TTS_TIMEOUT + "ms, forcing lock release");
+                // Stop any potentially stuck audio
+                if (typeof TTSProvider !== 'undefined' && TTSProvider.stop) {
+                    TTSProvider.stop();
+                }
+                onComplete();  // This will release the lock and continue processing
+            }
+        }, STREAMING_TTS_TIMEOUT);
 
         // NOTE: Lock is intentionally held during async TTS call.
         // The isStreamingSpeaking flag AND the lock together prevent re-entry.
@@ -225,6 +262,13 @@ const WebRTC = (function() {
             }
             resetStreamingState();
             streamingResponseId = responseId;
+
+            // Reset the stopped flag NOW that we're starting a genuinely new response
+            // This must happen AFTER resetStreamingState() and AFTER setting streamingResponseId
+            // so that new speech can play for this response
+            if (typeof TTSProvider !== 'undefined' && TTSProvider.resetStoppedFlag) {
+                TTSProvider.resetStoppedFlag();
+            }
         }
 
         streamingBuffer += delta;
@@ -255,6 +299,11 @@ const WebRTC = (function() {
     // Conversation history for local LLM (keeps last few exchanges)
     const MAX_HISTORY = 6;  // 3 exchanges (user + assistant each)
     let conversationHistory = [];
+
+    // Track pending user transcription to ensure correct chat log ordering
+    // In direct audio mode, transcription can arrive after assistant starts responding
+    let pendingUserTranscript = null;  // Transcript waiting to be logged
+    let currentResponseStarted = false;  // True once we receive first delta for current response
 
     // Reconnect state
     let reconnectAttempts = 0;
@@ -345,7 +394,10 @@ const WebRTC = (function() {
             const transcript = msg.transcript || "";
             if (transcript) {
                 UI.log("[you] " + transcript);
-                UI.addExchange("user", transcript, 0, 0);
+                // Always buffer the transcript - it will be logged at response.done
+                // This ensures correct ordering: assistant logged first, then user
+                // (prepend reverses the order so user appears above assistant)
+                pendingUserTranscript = transcript;
             }
             return;
         }
@@ -354,6 +406,14 @@ const WebRTC = (function() {
         if (t === "response.text.delta" || t === "response.audio_transcript.delta") {
             const id = getResponseId(msg);
             const delta = msg.delta || "";
+
+            // Mark that response has started (for transcript ordering)
+            // Don't flush pending transcript here - wait until response.done
+            // so we can log assistant first, then user (prepend reverses order)
+            if (!currentResponseStarted) {
+                currentResponseStarted = true;
+            }
+
             if (delta && TTSProvider.shouldUseSpeech()) {
                 handleTextDelta(delta, id);
             }
@@ -386,8 +446,19 @@ const WebRTC = (function() {
             const inTok = usage.input_tokens ?? usage.input_token_details?.text_tokens ?? 0;
             const outTok = usage.output_tokens ?? usage.output_token_details?.text_tokens ?? 0;
 
+            // Log assistant response
             if (assistantText) UI.log("[assistant] " + assistantText);
             UI.addExchange("assistant", assistantText, inTok, outTok);
+
+            // Log pending user transcript AFTER assistant (prepend reverses order)
+            // So user will appear ABOVE assistant in the display
+            if (pendingUserTranscript) {
+                UI.addExchange("user", pendingUserTranscript, 0, 0);
+                pendingUserTranscript = null;
+            }
+
+            // Reset for next exchange
+            currentResponseStarted = false;
 
             Events.emit(Events.EVENTS.ASSISTANT_RESPONSE, { text: assistantText, inTok, outTok });
 
@@ -426,6 +497,10 @@ const WebRTC = (function() {
                 localStream.getTracks().forEach(track => track.stop());
                 localStream = null;
             }
+
+            // Clean up streaming state to prevent orphaned timeouts
+            resetStreamingState();
+
             // Unsubscribe from events - wrap in try-catch to ensure cleanup completes
             if (unsubSpeakingStarted) {
                 try { unsubSpeakingStarted(); } catch {}

@@ -291,9 +291,27 @@ const server = http.createServer((req, res) => {
             handlePiperRequest(text, res);
         }
     } else if (req.method === 'POST') {
+        const MAX_BODY_SIZE = 1024 * 1024;  // 1MB limit for POST body
         let body = '';
-        req.on('data', chunk => { body += chunk.toString(); });
+        let bodyTooLarge = false;
+
+        req.on('data', chunk => {
+            if (bodyTooLarge) return;  // Stop processing if already too large
+
+            body += chunk.toString();
+
+            // Check size limit
+            if (body.length > MAX_BODY_SIZE) {
+                bodyTooLarge = true;
+                res.writeHead(413, { 'Content-Type': 'text/plain' });
+                res.end('Request body too large (max 1MB)');
+                req.destroy();  // Stop receiving more data
+            }
+        });
+
         req.on('end', () => {
+            if (bodyTooLarge) return;  // Already handled
+
             let text;
             try {
                 text = JSON.parse(body).text || '';
