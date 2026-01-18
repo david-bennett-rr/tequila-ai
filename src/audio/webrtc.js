@@ -18,6 +18,7 @@ const WebRTC = (function() {
     let streamingResponseId = null;     // Track which response we're streaming
     let streamingGeneration = 0;        // Generation counter to invalidate stale callbacks
     let streamingResponseComplete = false;  // True when response.done received, waiting for queue to drain
+    let processingQueueLock = false;    // Mutex to prevent concurrent processStreamingQueue execution
 
     // Get or create a consistent ID for a response
     // This ensures content_part.done and response.done use the same ID
@@ -84,6 +85,12 @@ const WebRTC = (function() {
         streamingResponseId = null;
         streamingGeneration++;  // Invalidate any pending callbacks
         streamingResponseComplete = false;
+        processingQueueLock = false;  // Release lock on reset
+
+        // Reset TTS stopped flag so new speech can play
+        if (typeof TTSProvider !== 'undefined' && TTSProvider.resetStoppedFlag) {
+            TTSProvider.resetStoppedFlag();
+        }
     };
 
     // Extract complete sentences from buffer, return { sentences: [], remaining: "" }
@@ -109,7 +116,14 @@ const WebRTC = (function() {
     };
 
     // Process next item in streaming queue
+    // Uses processingQueueLock as a mutex to prevent concurrent TTS playback
     const processStreamingQueue = () => {
+        // Acquire lock - prevent concurrent execution
+        if (processingQueueLock) {
+            return;
+        }
+        processingQueueLock = true;
+
         // Early exit if queue is empty or already speaking
         if (isStreamingSpeaking || streamingQueue.length === 0) {
             // Queue empty and not speaking - check if response is complete
@@ -125,11 +139,15 @@ const WebRTC = (function() {
                 }
                 streamingResponseComplete = false;  // Reset for next response
             }
+            processingQueueLock = false;  // Release lock
             return;
         }
 
         const sentence = streamingQueue.shift();
-        if (!sentence) return;
+        if (!sentence) {
+            processingQueueLock = false;  // Release lock
+            return;
+        }
 
         isStreamingSpeaking = true;
         const currentGen = streamingGeneration;  // Capture generation for callback validation
@@ -139,6 +157,7 @@ const WebRTC = (function() {
         if (typeof TTSProvider === 'undefined') {
             UI.log("[streaming] TTSProvider not available");
             isStreamingSpeaking = false;
+            processingQueueLock = false;  // Release lock
             return;
         }
 
@@ -149,11 +168,19 @@ const WebRTC = (function() {
             // Ignore callback if generation changed (new response started)
             if (currentGen !== streamingGeneration) {
                 UI.log("[streaming] ignoring stale callback (gen " + currentGen + " vs " + streamingGeneration + ")");
+                // CRITICAL: Still reset flags even for stale callbacks to prevent stuck state
+                // The new generation's resetStreamingState() should have already done this,
+                // but we do it again defensively in case of race conditions
+                // Note: We don't process the queue - let the new generation handle it
                 return;
             }
             isStreamingSpeaking = false;
+            processingQueueLock = false;  // Release lock before recursive call
             processStreamingQueue();
         };
+
+        // Release lock before async TTS call - the isStreamingSpeaking flag guards the queue
+        processingQueueLock = false;
 
         // Use streaming-aware TTS that calls back when done
         // Note: These are async functions but we don't await - they handle their own errors
@@ -189,11 +216,13 @@ const WebRTC = (function() {
             // (not just a late message from the current one)
             if (streamingResponseId !== null) {
                 UI.log("[streaming] new response detected: " + responseId + " (was: " + streamingResponseId + ")");
+                // Stop any currently playing audio before starting new response
+                if (typeof TTSProvider !== 'undefined' && TTSProvider.stop) {
+                    TTSProvider.stop();
+                }
             }
             resetStreamingState();
             streamingResponseId = responseId;
-            // Reset TTS stopped flag so new speech can play
-            TTSProvider.resetStoppedFlag();
         }
 
         streamingBuffer += delta;
@@ -681,9 +710,16 @@ const WebRTC = (function() {
 
         // Listen for user interruptions to reset streaming TTS
         unsubUserInterrupted = Events.on(Events.EVENTS.USER_INTERRUPTED, () => {
-            UI.log("[streaming] user interrupted - clearing queue");
-            // Reset streaming state first
+            UI.log("[streaming] user interrupted - clearing queue and stopping all audio");
+
+            // CRITICAL: Stop all TTS playback immediately to prevent speaking over
+            if (typeof TTSProvider !== 'undefined' && TTSProvider.stop) {
+                TTSProvider.stop();
+            }
+
+            // Reset streaming state
             resetStreamingState();
+
             // Ensure assistantSpeaking is cleared so UI returns to listening mode
             // (Speech.setAssistantSpeaking is called by the speech module, but we need
             // to ensure the streaming queue check doesn't leave us stuck)

@@ -10,6 +10,9 @@ const TTSProvider = (function() {
     let activeStreamingAudio = null;
     let streamingStopped = false;  // Flag to prevent callbacks after stop
 
+    // Track all active audio elements for comprehensive cleanup
+    let allActiveAudioElements = new Set();
+
     // Audio processing for volume normalization
     let audioContext = null;
     let compressor = null;
@@ -84,6 +87,53 @@ const TTSProvider = (function() {
         }
     };
 
+    // Stop all currently playing audio from any source
+    // This ensures no overlapping speech when starting new TTS
+    const stopAllAudio = () => {
+        // Stop browser TTS
+        if ('speechSynthesis' in window) {
+            window.speechSynthesis.cancel();
+        }
+
+        // Stop main elevenLabsAudio element
+        if (elevenLabsAudio) {
+            try { elevenLabsAudio.pause(); } catch {}
+            elevenLabsAudio.currentTime = 0;
+        }
+
+        // Stop active streaming audio
+        if (activeStreamingAudio) {
+            try { activeStreamingAudio.pause(); } catch {}
+            activeStreamingAudio = null;
+        }
+
+        // Stop all tracked audio elements
+        allActiveAudioElements.forEach(audio => {
+            try {
+                audio.pause();
+                audio.currentTime = 0;
+            } catch {}
+        });
+        allActiveAudioElements.clear();
+
+        // Clean up Chrome resume hack timer
+        if (chromeResumeHackTimer) {
+            clearInterval(chromeResumeHackTimer);
+            chromeResumeHackTimer = null;
+        }
+    };
+
+    // Track an audio element for cleanup
+    const trackAudioElement = (audio) => {
+        allActiveAudioElements.add(audio);
+        // Auto-remove when ended or errored
+        const cleanup = () => {
+            allActiveAudioElements.delete(audio);
+        };
+        audio.addEventListener('ended', cleanup, { once: true });
+        audio.addEventListener('error', cleanup, { once: true });
+    };
+
     // Helper to emit TTS events
     const emitTTSStarted = (provider) => {
         Events.emit(Events.EVENTS.TTS_STARTED, { provider });
@@ -140,8 +190,8 @@ const TTSProvider = (function() {
             return;
         }
 
-        // Cancel any ongoing speech
-        window.speechSynthesis.cancel();
+        // Stop ALL audio sources before starting new speech (prevents overlap)
+        stopAllAudio();
         stopTTSWatchdogs();
 
         // Chrome bug: voices may not be loaded yet
@@ -218,7 +268,8 @@ const TTSProvider = (function() {
             return;
         }
 
-        // Clean up any previous audio URL
+        // Stop ALL audio sources before starting new speech (prevents overlap)
+        stopAllAudio();
         revokeCurrentAudioUrl();
         stopTTSWatchdogs();
 
@@ -304,7 +355,8 @@ const TTSProvider = (function() {
         const endpoint = Storage.localTtsEndpoint.trim() || "http://localhost:5002/api/tts";
         let audioUrl = null;  // Track URL for this specific call
 
-        // Clean up any previous audio URL
+        // Stop ALL audio sources before starting new speech (prevents overlap)
+        stopAllAudio();
         revokeCurrentAudioUrl();
         stopTTSWatchdogs();
 
@@ -446,10 +498,13 @@ const TTSProvider = (function() {
 
             const audio = new Audio(audioUrl);
             activeStreamingAudio = audio;  // Track for stop()
+            trackAudioElement(audio);      // Track in global set for comprehensive cleanup
 
             audio.onended = () => {
                 revokeUrl();
-                activeStreamingAudio = null;
+                if (activeStreamingAudio === audio) {
+                    activeStreamingAudio = null;
+                }
                 // Only call onComplete if not stopped (stop() handles state)
                 if (!streamingStopped) {
                     onComplete?.();
@@ -457,7 +512,9 @@ const TTSProvider = (function() {
             };
             audio.onerror = () => {
                 revokeUrl();
-                activeStreamingAudio = null;
+                if (activeStreamingAudio === audio) {
+                    activeStreamingAudio = null;
+                }
                 if (!streamingStopped) {
                     onComplete?.();
                 }
@@ -468,7 +525,9 @@ const TTSProvider = (function() {
             } catch (playError) {
                 // Clean up URL if playback fails
                 revokeUrl();
-                activeStreamingAudio = null;
+                if (activeStreamingAudio === audio) {
+                    activeStreamingAudio = null;
+                }
                 throw playError;  // Re-throw to be caught by outer catch
             }
         } catch (e) {
@@ -530,10 +589,13 @@ const TTSProvider = (function() {
 
             const audio = new Audio(audioUrl);
             activeStreamingAudio = audio;  // Track for stop()
+            trackAudioElement(audio);      // Track in global set for comprehensive cleanup
 
             audio.onended = () => {
                 revokeUrl();
-                activeStreamingAudio = null;
+                if (activeStreamingAudio === audio) {
+                    activeStreamingAudio = null;
+                }
                 // Only call onComplete if not stopped (stop() handles state)
                 if (!streamingStopped) {
                     onComplete?.();
@@ -541,7 +603,9 @@ const TTSProvider = (function() {
             };
             audio.onerror = () => {
                 revokeUrl();
-                activeStreamingAudio = null;
+                if (activeStreamingAudio === audio) {
+                    activeStreamingAudio = null;
+                }
                 if (!streamingStopped) {
                     onComplete?.();
                 }
@@ -552,7 +616,9 @@ const TTSProvider = (function() {
             } catch (playError) {
                 // Clean up URL if playback fails
                 revokeUrl();
-                activeStreamingAudio = null;
+                if (activeStreamingAudio === audio) {
+                    activeStreamingAudio = null;
+                }
                 throw playError;  // Re-throw to be caught by outer catch
             }
         } catch (e) {
@@ -570,21 +636,12 @@ const TTSProvider = (function() {
         stopTTSWatchdogs();
         revokeCurrentAudioUrl();
 
-        // Stop non-streaming audio
-        if (elevenLabsAudio) {
-            elevenLabsAudio.pause();
-            elevenLabsAudio = null;
-        }
+        // Use comprehensive audio stop to ensure ALL audio sources are stopped
+        stopAllAudio();
 
-        // Stop streaming audio
-        if (activeStreamingAudio) {
-            activeStreamingAudio.pause();
-            activeStreamingAudio = null;
-        }
-
-        if ('speechSynthesis' in window) {
-            window.speechSynthesis.cancel();
-        }
+        // Also null out our references (stopAllAudio pauses but doesn't null these)
+        elevenLabsAudio = null;
+        activeStreamingAudio = null;
     };
 
     // Reset the stopped flag (call this when starting new speech)
