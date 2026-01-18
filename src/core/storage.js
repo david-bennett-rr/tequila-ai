@@ -92,6 +92,97 @@ const Storage = (function() {
         },
         set useDirectAudio(v) {
             safeSet("USE_DIRECT_AUDIO", v ? "true" : "false");
+        },
+        get listenWhileSpeaking() {
+            return safeGet("LISTEN_WHILE_SPEAKING", "false") === "true";
+        },
+        set listenWhileSpeaking(v) {
+            safeSet("LISTEN_WHILE_SPEAKING", v ? "true" : "false");
+        },
+        get elevenLabsVoiceHistory() {
+            try {
+                const raw = safeGet("ELEVENLABS_VOICE_HISTORY", "[]");
+                return JSON.parse(raw);
+            } catch (e) {
+                return [];
+            }
+        },
+        set elevenLabsVoiceHistory(v) {
+            safeSet("ELEVENLABS_VOICE_HISTORY", JSON.stringify(v || []));
+        },
+        // Add a voice ID to history (deduplicates and limits to 20 entries)
+        addVoiceToHistory(voiceId) {
+            if (!voiceId || typeof voiceId !== 'string') return;
+            const trimmed = voiceId.trim();
+            if (!trimmed) return;
+
+            let history = this.elevenLabsVoiceHistory;
+            // Remove if already exists (will re-add at front)
+            history = history.filter(v => v !== trimmed);
+            // Add to front
+            history.unshift(trimmed);
+            // Limit to 20 entries
+            if (history.length > 20) {
+                history = history.slice(0, 20);
+            }
+            this.elevenLabsVoiceHistory = history;
+        },
+
+        // ============= Persona Storage =============
+        // Default Fermenter persona
+        _defaultPersona: {
+            name: "Fermenter",
+            role: "a tequila fermenter living in La Rojena, the oldest distillery in N. America"
+        },
+
+        get currentPersonaName() {
+            return safeGet("CURRENT_PERSONA_NAME", "Fermenter");
+        },
+        set currentPersonaName(v) {
+            safeSet("CURRENT_PERSONA_NAME", v || "Fermenter");
+        },
+
+        get personaLibrary() {
+            try {
+                const raw = safeGet("PERSONA_LIBRARY", "{}");
+                const library = JSON.parse(raw);
+                // Ensure Fermenter always exists
+                if (!library["Fermenter"]) {
+                    library["Fermenter"] = this._defaultPersona;
+                }
+                return library;
+            } catch (e) {
+                return { "Fermenter": this._defaultPersona };
+            }
+        },
+        set personaLibrary(v) {
+            safeSet("PERSONA_LIBRARY", JSON.stringify(v || {}));
+        },
+
+        // Get current persona object
+        getCurrentPersona() {
+            const library = this.personaLibrary;
+            const name = this.currentPersonaName;
+            return library[name] || this._defaultPersona;
+        },
+
+        // Save a persona to library
+        savePersona(name, role) {
+            if (!name || typeof name !== 'string') return;
+            const trimmedName = name.trim();
+            if (!trimmedName) return;
+
+            const library = this.personaLibrary;
+            library[trimmedName] = {
+                name: trimmedName,
+                role: (role || "").trim()
+            };
+            this.personaLibrary = library;
+        },
+
+        // Get list of persona names
+        getPersonaNames() {
+            return Object.keys(this.personaLibrary);
         }
     };
 

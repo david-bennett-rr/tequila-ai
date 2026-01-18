@@ -456,6 +456,12 @@ const Speech = (function() {
                 AppState.transition(AppState.STATES.SPEAKING, 'assistant speaking');
             }
 
+            // Mute mic if listenWhileSpeaking is OFF
+            if (!Storage.listenWhileSpeaking && typeof WebRTC !== 'undefined' && WebRTC.setMicMuted) {
+                WebRTC.setMicMuted(true);
+                UI.log("[speech] mic muted (listenWhileSpeaking=off)");
+            }
+
             if (silenceTimer) {
                 clearTimeout(silenceTimer);
                 silenceTimer = null;
@@ -466,6 +472,12 @@ const Speech = (function() {
         } else {
             UI.log("[speech] assistant stopped speaking");
             Events.emit(Events.EVENTS.ASSISTANT_SPEAKING_STOPPED);
+
+            // Unmute mic if it was muted
+            if (!Storage.listenWhileSpeaking && typeof WebRTC !== 'undefined' && WebRTC.setMicMuted) {
+                WebRTC.setMicMuted(false);
+                UI.log("[speech] mic unmuted");
+            }
 
             finalTranscript = "";
             retryCount = 0;

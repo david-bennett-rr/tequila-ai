@@ -57,24 +57,126 @@ const App = (function() {
         const voice = $("voice");
         const elevenLabsKey = $("elevenLabsKey");
         const elevenLabsVoice = $("elevenLabsVoice");
+        const elevenLabsVoiceSelect = $("elevenLabsVoiceSelect");
+        const elevenLabsVoiceNewRow = $("elevenLabsVoiceNewRow");
         const ttsProvider = $("ttsProvider");
         const localTtsEndpoint = $("localTtsEndpoint");
         const llmProvider = $("llmProvider");
         const localLlmEndpoint = $("localLlmEndpoint");
         const localLlmModel = $("localLlmModel");
         const useDirectAudio = $("useDirectAudio");
+        const listenWhileSpeaking = $("listenWhileSpeaking");
+
+        // Persona elements
+        const personaSelect = $("personaSelect");
+        const personaName = $("personaName");
+        const personaRole = $("personaRole");
+        const personaNameRow = $("personaNameRow");
 
         if (apiKey) apiKey.value = Storage.apiKey;
         if (model) model.value = Storage.model;
         if (voice) voice.value = Storage.voice;
         if (elevenLabsKey) elevenLabsKey.value = Storage.elevenLabsKey;
-        if (elevenLabsVoice) elevenLabsVoice.value = Storage.elevenLabsVoice;
         if (ttsProvider) ttsProvider.value = Storage.ttsProvider;
         if (localTtsEndpoint) localTtsEndpoint.value = Storage.localTtsEndpoint || "http://localhost:5002/api/tts";
         if (llmProvider) llmProvider.value = Storage.llmProvider;
         if (localLlmEndpoint) localLlmEndpoint.value = Storage.localLlmEndpoint || "http://localhost:11434/api/generate";
         if (localLlmModel) localLlmModel.value = Storage.localLlmModel || "llama2";
         if (useDirectAudio) useDirectAudio.checked = Storage.useDirectAudio;
+        if (listenWhileSpeaking) listenWhileSpeaking.checked = Storage.listenWhileSpeaking;
+
+        // Populate persona dropdown
+        const populatePersonaDropdown = () => {
+            if (!personaSelect) return;
+            const currentName = Storage.currentPersonaName;
+            const names = Storage.getPersonaNames();
+
+            // Clear and rebuild
+            personaSelect.innerHTML = '<option value="">-- Create new persona --</option>';
+            names.forEach(name => {
+                const option = document.createElement("option");
+                option.value = name;
+                option.textContent = name;
+                personaSelect.appendChild(option);
+            });
+
+            // Set current selection
+            if (currentName && names.includes(currentName)) {
+                personaSelect.value = currentName;
+                if (personaNameRow) personaNameRow.style.display = "none";
+                // Load current persona data
+                const persona = Storage.getCurrentPersona();
+                if (personaRole) personaRole.value = persona.role || "";
+            } else {
+                personaSelect.value = "";
+                if (personaNameRow) personaNameRow.style.display = "flex";
+            }
+        };
+        populatePersonaDropdown();
+
+        // Handle persona select change
+        if (personaSelect) {
+            personaSelect.addEventListener("change", () => {
+                if (personaSelect.value === "") {
+                    // Creating new persona
+                    if (personaNameRow) personaNameRow.style.display = "flex";
+                    if (personaName) personaName.value = "";
+                    if (personaRole) personaRole.value = "";
+                } else {
+                    // Selected existing persona
+                    if (personaNameRow) personaNameRow.style.display = "none";
+                    const library = Storage.personaLibrary;
+                    const persona = library[personaSelect.value];
+                    if (persona && personaRole) {
+                        personaRole.value = persona.role || "";
+                    }
+                }
+            });
+        }
+
+        // Populate ElevenLabs voice history dropdown
+        const populateVoiceHistory = () => {
+            if (!elevenLabsVoiceSelect) return;
+            const currentValue = Storage.elevenLabsVoice;
+            const history = Storage.elevenLabsVoiceHistory;
+
+            // Clear existing options except the first "enter new" option
+            elevenLabsVoiceSelect.innerHTML = '<option value="">-- Enter new voice ID --</option>';
+
+            // Add history options
+            history.forEach(voiceId => {
+                const option = document.createElement("option");
+                option.value = voiceId;
+                option.textContent = voiceId;
+                elevenLabsVoiceSelect.appendChild(option);
+            });
+
+            // Set current value if it exists in history
+            if (currentValue && history.includes(currentValue)) {
+                elevenLabsVoiceSelect.value = currentValue;
+                if (elevenLabsVoiceNewRow) elevenLabsVoiceNewRow.style.display = "none";
+            } else if (currentValue) {
+                // Current value not in history - show in text input
+                elevenLabsVoiceSelect.value = "";
+                if (elevenLabsVoice) elevenLabsVoice.value = currentValue;
+                if (elevenLabsVoiceNewRow) elevenLabsVoiceNewRow.style.display = "flex";
+            }
+        };
+        populateVoiceHistory();
+
+        // Handle voice select change
+        if (elevenLabsVoiceSelect) {
+            elevenLabsVoiceSelect.addEventListener("change", () => {
+                if (elevenLabsVoiceSelect.value === "") {
+                    // User wants to enter a new voice ID
+                    if (elevenLabsVoiceNewRow) elevenLabsVoiceNewRow.style.display = "flex";
+                    if (elevenLabsVoice) elevenLabsVoice.value = "";
+                } else {
+                    // User selected an existing voice
+                    if (elevenLabsVoiceNewRow) elevenLabsVoiceNewRow.style.display = "none";
+                }
+            });
+        }
 
         // Update provider field visibility
         UI.updateProviderFields();
@@ -109,17 +211,55 @@ const App = (function() {
         const saveKey = $("saveKey");
         if (saveKey) {
             saveKey.onclick = () => {
+                // Save persona
+                let selectedPersonaName = "";
+                if (personaSelect && personaSelect.value) {
+                    // Existing persona selected - update its role
+                    selectedPersonaName = personaSelect.value;
+                    const roleValue = personaRole ? personaRole.value.trim() : "";
+                    Storage.savePersona(selectedPersonaName, roleValue);
+                } else if (personaName) {
+                    // New persona - save with name and role
+                    const nameValue = personaName.value.trim();
+                    const roleValue = personaRole ? personaRole.value.trim() : "";
+                    if (nameValue) {
+                        Storage.savePersona(nameValue, roleValue);
+                        selectedPersonaName = nameValue;
+                        populatePersonaDropdown();
+                    }
+                }
+                if (selectedPersonaName) {
+                    Storage.currentPersonaName = selectedPersonaName;
+                }
+
                 Storage.apiKey = apiKey ? apiKey.value.trim() : "";
                 Storage.model = model ? (model.value.trim() || "gpt-realtime") : "gpt-realtime";
                 Storage.voice = voice ? voice.value : "alloy";
                 Storage.elevenLabsKey = elevenLabsKey ? elevenLabsKey.value.trim() : "";
-                Storage.elevenLabsVoice = elevenLabsVoice ? (elevenLabsVoice.value.trim() || "21m00Tcm4TlvDq8ikWAM") : "";
+
+                // Get voice ID from either select dropdown or text input
+                let voiceIdValue = "";
+                if (elevenLabsVoiceSelect && elevenLabsVoiceSelect.value) {
+                    // User selected from dropdown
+                    voiceIdValue = elevenLabsVoiceSelect.value;
+                } else if (elevenLabsVoice) {
+                    // User entered new voice ID
+                    voiceIdValue = elevenLabsVoice.value.trim();
+                }
+                Storage.elevenLabsVoice = voiceIdValue || "21m00Tcm4TlvDq8ikWAM";
+
+                // Save voice ID to history for dropdown
+                if (voiceIdValue) {
+                    Storage.addVoiceToHistory(voiceIdValue);
+                    populateVoiceHistory();
+                }
                 Storage.ttsProvider = ttsProvider ? ttsProvider.value : "openai";
                 Storage.localTtsEndpoint = localTtsEndpoint ? localTtsEndpoint.value.trim() : "";
                 Storage.llmProvider = llmProvider ? llmProvider.value : "openai";
                 Storage.localLlmEndpoint = localLlmEndpoint ? localLlmEndpoint.value.trim() : "";
                 Storage.localLlmModel = localLlmModel ? (localLlmModel.value.trim() || "llama2") : "llama2";
                 Storage.useDirectAudio = useDirectAudio ? useDirectAudio.checked : false;
+                Storage.listenWhileSpeaking = listenWhileSpeaking ? listenWhileSpeaking.checked : false;
                 UI.toast("saved");
 
                 // Brief visual feedback

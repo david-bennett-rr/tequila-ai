@@ -2,65 +2,91 @@
 const Prompts = (function() {
 
     // ============= PERSONA =============
-    // Change these to swap the assistant's personality
-    const PERSONA = {
-        name: "Fermenter",
-        role: "a tequila fermenter living in La Rojena, the oldest distillery in N. America",
-        style: "Chat naturally, keep it brief. Sprinkle some Spanish into mostly-English responses!",
-        rules: `
-        2 sentence max. No emojis. Be casual and warm. 
+    // Static defaults used when Storage isn't available yet
+    const DEFAULT_STYLE = "Be BRIEF. 1-2 sentences MAX. Sprinkle Spanish into mostly-English.";
+    const DEFAULT_RULES = `
+        CRITICAL: Keep responses SHORT - 1-2 sentences only, NEVER more.
+        No emojis. Be casual and warm.
+        Answer directly, don't over-explain or ramble.
+        If asked a yes/no question, start with yes or no.
         Remember what the guest said before.
         Only respond when directly spoken to.
-        `,
-        userLabel: "Guest",       // How to label user messages
-        assistantLabel: "You"     // How to label assistant messages
+        `;
+    const DEFAULT_USER_LABEL = "Guest";
+    const DEFAULT_ASSISTANT_LABEL = "You";
+
+    // Get current persona from storage (or defaults)
+    const getPersona = () => {
+        if (typeof Storage !== 'undefined' && Storage.getCurrentPersona) {
+            const stored = Storage.getCurrentPersona();
+            return {
+                name: stored.name || "Fermenter",
+                role: stored.role || "a tequila fermenter living in La Rojena, the oldest distillery in N. America",
+                style: DEFAULT_STYLE,
+                rules: DEFAULT_RULES,
+                userLabel: DEFAULT_USER_LABEL,
+                assistantLabel: DEFAULT_ASSISTANT_LABEL
+            };
+        }
+        // Fallback if Storage not loaded yet
+        return {
+            name: "Fermenter",
+            role: "a tequila fermenter living in La Rojena, the oldest distillery in N. America",
+            style: DEFAULT_STYLE,
+            rules: DEFAULT_RULES,
+            userLabel: DEFAULT_USER_LABEL,
+            assistantLabel: DEFAULT_ASSISTANT_LABEL
+        };
     };
 
-    // ============= TEMPLATES =============
+    // For backwards compatibility - returns current persona
+    const PERSONA = getPersona();
 
-    // System instruction for OpenAI Realtime session
-    const REALTIME_INSTRUCTIONS = `You are ${PERSONA.role}. ${PERSONA.style} Keep replies short. The user is sending text messages only, not audio.`;
+    // ============= TEMPLATE BUILDERS =============
 
-    // Prompt template for instruct-capable models (OpenAI, Ollama instruct models)
+    // Build realtime instructions dynamically
+    const getRealtimeInstructions = () => {
+        const p = getPersona();
+        return `You are ${p.role}. ${p.style} IMPORTANT: Keep ALL replies to 1-2 sentences maximum. Never give long explanations. Be concise and direct.`;
+    };
+
+    // Build the final prompt for instruct models
     // Variables: {summary}, {history}, {text}
-    const INSTRUCT_TEMPLATE = `You're ${PERSONA.role}. ${PERSONA.style}
+    const buildInstructPrompt = (text, summary, history) => {
+        const p = getPersona();
+        const template = `You're ${p.role}. ${p.style}
 
-Rules: ${PERSONA.rules}
+Rules: ${p.rules}
 
 Background: {summary}
 
-{history}${PERSONA.userLabel}: {text}
-${PERSONA.assistantLabel}:`;
+{history}${p.userLabel}: {text}
+${p.assistantLabel}:`;
 
-    // Prompt template for base/completion models (non-instruct)
-    // Variables: {history}, {text}
-    const BASE_TEMPLATE = `[${PERSONA.name} gives a quick, friendly one-liner]
-
-{history}${PERSONA.userLabel}: {text}
-${PERSONA.name}:`;
-
-    // ============= BUILDERS =============
-
-    // Build the final prompt for instruct models
-    const buildInstructPrompt = (text, summary, history) => {
-        return INSTRUCT_TEMPLATE
+        return template
             .replace('{summary}', summary || '')
             .replace('{history}', history || '')
             .replace('{text}', text);
     };
 
     // Build the final prompt for base models
+    // Variables: {history}, {text}
     const buildBasePrompt = (text, history) => {
-        return BASE_TEMPLATE
+        const p = getPersona();
+        const template = `[${p.name} gives a quick, friendly one-liner]
+
+{history}${p.userLabel}: {text}
+${p.name}:`;
+
+        return template
             .replace('{history}', history || '')
             .replace('{text}', text);
     };
 
     return {
-        PERSONA,
-        REALTIME_INSTRUCTIONS,
-        INSTRUCT_TEMPLATE,
-        BASE_TEMPLATE,
+        PERSONA,  // For backwards compat (snapshot at load time)
+        getPersona,  // Dynamic getter
+        get REALTIME_INSTRUCTIONS() { return getRealtimeInstructions(); },
         buildInstructPrompt,
         buildBasePrompt
     };

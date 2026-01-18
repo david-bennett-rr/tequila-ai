@@ -287,19 +287,58 @@ button svg {
 }
 
 .settings-section {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
 }
 
-.settings-section h3 {
+.settings-section summary {
+  display: flex;
+  align-items: center;
+  padding: 12px 14px;
+  cursor: pointer;
+  list-style: none;
+  transition: background 0.2s ease;
+}
+
+.settings-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-section summary::after {
+  content: "";
+  margin-left: auto;
+  width: 6px;
+  height: 6px;
+  border-right: 2px solid var(--text-secondary);
+  border-bottom: 2px solid var(--text-secondary);
+  transform: rotate(-45deg);
+  transition: transform 0.2s ease;
+}
+
+.settings-section[open] summary::after {
+  transform: rotate(45deg);
+}
+
+.settings-section summary:hover {
+  background: var(--bg-elevated);
+}
+
+.settings-section summary h3 {
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.8px;
   color: var(--accent);
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
+  margin: 0;
+}
+
+.settings-section .section-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+  border-top: 1px solid var(--border);
 }
 
 .setting-row {
@@ -331,7 +370,8 @@ button svg {
 
 input[type="text"],
 input[type="password"],
-select {
+select,
+textarea {
   width: 100%;
   padding: 10px 14px;
   font-size: 14px;
@@ -343,15 +383,22 @@ select {
   transition: all 0.2s ease;
 }
 
+textarea {
+  resize: vertical;
+  min-height: 60px;
+}
+
 input[type="text"]:focus,
 input[type="password"]:focus,
-select:focus {
+select:focus,
+textarea:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
-input::placeholder {
+input::placeholder,
+textarea::placeholder {
   color: var(--text-muted);
 }
 
