@@ -175,6 +175,19 @@ const Speech = (function() {
         // Clean up existing handlers if reinitializing
         removeHandlers();
 
+        // Stop existing recognition if active to prevent state corruption
+        if (recognition && AppState.getFlag('recognitionActive')) {
+            try { recognition.stop(); } catch {}
+            AppState.setFlag('recognitionActive', false);
+        }
+
+        // Clear any pending timers from previous init
+        silenceTimer = Utils.clearTimer(silenceTimer);
+        pendingRetryTimer = Utils.clearTimer(pendingRetryTimer);
+        finalTranscript = "";
+        recognitionBlocked = false;
+        retryCount = 0;
+
         if (!recognition) {
             recognition = new SpeechRecognition();
             recognition.continuous = true;

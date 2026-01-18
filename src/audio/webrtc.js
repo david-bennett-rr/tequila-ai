@@ -308,7 +308,13 @@ const WebRTC = (function() {
     };
 
     const scheduleReconnect = () => {
-        if (!AppState.getFlag('shouldBeConnected') || reconnectTimer) return;
+        if (!AppState.getFlag('shouldBeConnected')) return;
+
+        // Clear any existing timer to prevent accumulation
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
 
         // Check if we've exceeded max reconnect attempts - trigger page reload as last resort
         if (reconnectAttempts >= Config.MAX_RECONNECT_ATTEMPTS) {
@@ -492,6 +498,10 @@ const WebRTC = (function() {
 
             // Clean up streaming state to prevent orphaned timeouts
             resetStreamingState();
+
+            // Clear pending transcript to prevent it from being logged to wrong response after reconnect
+            pendingUserTranscript = null;
+            currentResponseStarted = false;
 
             // Unsubscribe from events - wrap in try-catch to ensure cleanup completes
             if (unsubSpeakingStarted) {

@@ -71,8 +71,19 @@ const NoiseMonitor = (function() {
     };
 
     const startMonitoring = () => {
-        if (monitorInterval) return;
         if (!analyser) return;
+
+        // Clear any existing interval to prevent duplicate monitors
+        if (monitorInterval) {
+            clearInterval(monitorInterval);
+            monitorInterval = null;
+        }
+
+        // Reset calibration state for fresh start
+        isCalibrating = true;
+        calibrationSamples = 0;
+        noiseHistory = [];
+        peakLevel = 0;
 
         const dataArray = new Uint8Array(analyser.frequencyBinCount);
 
