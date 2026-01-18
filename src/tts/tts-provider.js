@@ -8,6 +8,7 @@ const TTSProvider = (function() {
 
     // Track active streaming audio for cleanup on stop
     let activeStreamingAudio = null;
+    let activeStreamingAudioUrl = null;  // Track URL separately for cleanup on stop
     let streamingStopped = false;  // Flag to prevent callbacks after stop
 
     // Track all active audio elements for comprehensive cleanup
@@ -498,12 +499,14 @@ const TTSProvider = (function() {
 
             const audio = new Audio(audioUrl);
             activeStreamingAudio = audio;  // Track for stop()
+            activeStreamingAudioUrl = audioUrl;  // Track URL for cleanup on stop()
             trackAudioElement(audio);      // Track in global set for comprehensive cleanup
 
             audio.onended = () => {
                 revokeUrl();
                 if (activeStreamingAudio === audio) {
                     activeStreamingAudio = null;
+                    activeStreamingAudioUrl = null;
                 }
                 // Only call onComplete if not stopped (stop() handles state)
                 if (!streamingStopped) {
@@ -514,6 +517,7 @@ const TTSProvider = (function() {
                 revokeUrl();
                 if (activeStreamingAudio === audio) {
                     activeStreamingAudio = null;
+                    activeStreamingAudioUrl = null;
                 }
                 if (!streamingStopped) {
                     onComplete?.();
@@ -527,6 +531,7 @@ const TTSProvider = (function() {
                 revokeUrl();
                 if (activeStreamingAudio === audio) {
                     activeStreamingAudio = null;
+                    activeStreamingAudioUrl = null;
                 }
                 throw playError;  // Re-throw to be caught by outer catch
             }
@@ -589,12 +594,14 @@ const TTSProvider = (function() {
 
             const audio = new Audio(audioUrl);
             activeStreamingAudio = audio;  // Track for stop()
+            activeStreamingAudioUrl = audioUrl;  // Track URL for cleanup on stop()
             trackAudioElement(audio);      // Track in global set for comprehensive cleanup
 
             audio.onended = () => {
                 revokeUrl();
                 if (activeStreamingAudio === audio) {
                     activeStreamingAudio = null;
+                    activeStreamingAudioUrl = null;
                 }
                 // Only call onComplete if not stopped (stop() handles state)
                 if (!streamingStopped) {
@@ -605,6 +612,7 @@ const TTSProvider = (function() {
                 revokeUrl();
                 if (activeStreamingAudio === audio) {
                     activeStreamingAudio = null;
+                    activeStreamingAudioUrl = null;
                 }
                 if (!streamingStopped) {
                     onComplete?.();
@@ -618,6 +626,7 @@ const TTSProvider = (function() {
                 revokeUrl();
                 if (activeStreamingAudio === audio) {
                     activeStreamingAudio = null;
+                    activeStreamingAudioUrl = null;
                 }
                 throw playError;  // Re-throw to be caught by outer catch
             }
@@ -635,6 +644,13 @@ const TTSProvider = (function() {
 
         stopTTSWatchdogs();
         revokeCurrentAudioUrl();
+
+        // Revoke streaming audio URL to prevent memory leak
+        // (onended won't fire since we're pausing, not ending naturally)
+        if (activeStreamingAudioUrl) {
+            URL.revokeObjectURL(activeStreamingAudioUrl);
+            activeStreamingAudioUrl = null;
+        }
 
         // Use comprehensive audio stop to ensure ALL audio sources are stopped
         stopAllAudio();

@@ -164,14 +164,15 @@ const WebRTC = (function() {
         const provider = TTSProvider.getProvider();
 
         // Callback that validates generation before continuing
+        // NOTE: Lock is held until this callback fires to prevent race conditions
         const onComplete = () => {
             // Ignore callback if generation changed (new response started)
             if (currentGen !== streamingGeneration) {
                 UI.log("[streaming] ignoring stale callback (gen " + currentGen + " vs " + streamingGeneration + ")");
-                // CRITICAL: Still reset flags even for stale callbacks to prevent stuck state
-                // The new generation's resetStreamingState() should have already done this,
-                // but we do it again defensively in case of race conditions
-                // Note: We don't process the queue - let the new generation handle it
+                // CRITICAL: Still release lock for stale callbacks to prevent deadlock
+                // The new generation's resetStreamingState() should have already reset the lock,
+                // but we do it again defensively
+                processingQueueLock = false;
                 return;
             }
             isStreamingSpeaking = false;
@@ -179,8 +180,9 @@ const WebRTC = (function() {
             processStreamingQueue();
         };
 
-        // Release lock before async TTS call - the isStreamingSpeaking flag guards the queue
-        processingQueueLock = false;
+        // NOTE: Lock is intentionally held during async TTS call.
+        // The isStreamingSpeaking flag AND the lock together prevent re-entry.
+        // Lock is released in onComplete callback when TTS finishes.
 
         // Use streaming-aware TTS that calls back when done
         // Note: These are async functions but we don't await - they handle their own errors
@@ -424,17 +426,17 @@ const WebRTC = (function() {
                 localStream.getTracks().forEach(track => track.stop());
                 localStream = null;
             }
-            // Unsubscribe from events
+            // Unsubscribe from events - wrap in try-catch to ensure cleanup completes
             if (unsubSpeakingStarted) {
-                unsubSpeakingStarted();
+                try { unsubSpeakingStarted(); } catch {}
                 unsubSpeakingStarted = null;
             }
             if (unsubSpeakingStopped) {
-                unsubSpeakingStopped();
+                try { unsubSpeakingStopped(); } catch {}
                 unsubSpeakingStopped = null;
             }
             if (unsubUserInterrupted) {
-                unsubUserInterrupted();
+                try { unsubUserInterrupted(); } catch {}
                 unsubUserInterrupted = null;
             }
             micMuted = false;
@@ -453,16 +455,17 @@ const WebRTC = (function() {
 
         // Clean up any existing event listeners before reconnecting
         // This prevents listener accumulation when connect() is called multiple times
+        // Wrap each in try-catch to ensure one failure doesn't prevent others from being cleaned
         if (unsubSpeakingStarted) {
-            unsubSpeakingStarted();
+            try { unsubSpeakingStarted(); } catch (e) { UI.log("[cleanup] unsubSpeakingStarted error: " + e.message); }
             unsubSpeakingStarted = null;
         }
         if (unsubSpeakingStopped) {
-            unsubSpeakingStopped();
+            try { unsubSpeakingStopped(); } catch (e) { UI.log("[cleanup] unsubSpeakingStopped error: " + e.message); }
             unsubSpeakingStopped = null;
         }
         if (unsubUserInterrupted) {
-            unsubUserInterrupted();
+            try { unsubUserInterrupted(); } catch (e) { UI.log("[cleanup] unsubUserInterrupted error: " + e.message); }
             unsubUserInterrupted = null;
         }
 
@@ -816,8 +819,9 @@ const WebRTC = (function() {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 120000);
 
-            // Wrap in Promise.resolve to ensure all errors (sync and async) are caught
-            Promise.resolve().then(async () => {
+            // Use async IIFE with comprehensive error handling
+            // All errors are caught in a single place, timeout is always cleared
+            (async () => {
                 try {
                     const res = await fetch(localLlmEndpoint, {
                         method: "POST",
@@ -895,16 +899,10 @@ const WebRTC = (function() {
                     Events.emit(Events.EVENTS.ERROR, { source: 'local-llm', error: e.message });
                     UI.setTranscript("Listening...", "listening");
                 } finally {
-                    // Always clear timeout to prevent leaks
+                    // Always clear timeout to prevent leaks - single cleanup point
                     clearTimeout(timeoutId);
                 }
-            }).catch(e => {
-                // Catch any unhandled errors from the async IIFE to prevent unhandled rejection
-                UI.log("[local-llm] unexpected error: " + e.message);
-                Events.emit(Events.EVENTS.ERROR, { source: 'local-llm', error: e.message, unexpected: true });
-                UI.setTranscript("Listening...", "listening");
-                clearTimeout(timeoutId);
-            });
+            })();
             return;
         }
 
