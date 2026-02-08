@@ -45,10 +45,14 @@ const Prompts = (function() {
 
     // ============= TEMPLATE BUILDERS =============
 
-    // Build realtime instructions dynamically
+    // Build realtime instructions dynamically (includes summary for context)
     const getRealtimeInstructions = () => {
         const p = getPersona();
-        return `You are ${p.role}. ${p.style} IMPORTANT: Keep ALL replies to 1-2 sentences maximum. Never give long explanations. Be concise and direct.`;
+        const summary = (typeof Summary !== 'undefined' && Summary.summary) ? Summary.summary : '';
+        return `You are ${p.role}. ${p.style} IMPORTANT: Keep ALL replies to 1-2 sentences maximum. Never give long explanations. Be concise and direct.
+
+Background knowledge:
+${summary}`;
     };
 
     // Build the final prompt for instruct models

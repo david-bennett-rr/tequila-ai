@@ -59,8 +59,8 @@ const Utils = (function() {
   // Usage: Utils.stopAudio(audioElement)
   const stopAudio = (audio) => {
     if (!audio) return;
-    try { audio.pause(); } catch {}
-    try { audio.currentTime = 0; } catch {}
+    try { audio.pause(); } catch (e) { console.warn("[utils] audio.pause error:", e.message); }
+    try { audio.currentTime = 0; } catch (e) { console.warn("[utils] audio.currentTime reset error:", e.message); }
   };
 
   // Stop all tracks in a MediaStream
@@ -68,7 +68,7 @@ const Utils = (function() {
   const stopMediaStream = (stream) => {
     if (!stream) return;
     stream.getTracks().forEach(track => {
-      try { track.stop(); } catch {}
+      try { track.stop(); } catch (e) { console.warn("[utils] track.stop error:", e.message); }
     });
   };
 

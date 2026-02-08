@@ -365,7 +365,8 @@ const WebRTC = (function() {
         let msg;
         try {
             msg = JSON.parse(e.data);
-        } catch {
+        } catch (parseErr) {
+            UI.log("[dc] failed to parse message: " + parseErr.message);
             return;
         }
 
@@ -491,8 +492,8 @@ const WebRTC = (function() {
         cleanupInProgress = true;
 
         try {
-            try { dataChannel?.close(); } catch {}
-            try { pc?.close(); } catch {}
+            try { dataChannel?.close(); } catch (e) { UI.log("[cleanup] dataChannel close error: " + e.message); }
+            try { pc?.close(); } catch (e) { UI.log("[cleanup] pc close error: " + e.message); }
             Utils.stopMediaStream(localStream);
             localStream = null;
 
@@ -505,15 +506,15 @@ const WebRTC = (function() {
 
             // Unsubscribe from events - wrap in try-catch to ensure cleanup completes
             if (unsubSpeakingStarted) {
-                try { unsubSpeakingStarted(); } catch {}
+                try { unsubSpeakingStarted(); } catch (e) { UI.log("[cleanup] unsubSpeakingStarted error: " + e.message); }
                 unsubSpeakingStarted = null;
             }
             if (unsubSpeakingStopped) {
-                try { unsubSpeakingStopped(); } catch {}
+                try { unsubSpeakingStopped(); } catch (e) { UI.log("[cleanup] unsubSpeakingStopped error: " + e.message); }
                 unsubSpeakingStopped = null;
             }
             if (unsubUserInterrupted) {
-                try { unsubUserInterrupted(); } catch {}
+                try { unsubUserInterrupted(); } catch (e) { UI.log("[cleanup] unsubUserInterrupted error: " + e.message); }
                 unsubUserInterrupted = null;
             }
             micMuted = false;
@@ -712,9 +713,9 @@ const WebRTC = (function() {
             sessionConfig.input_audio_transcription = { model: "whisper-1" };
             sessionConfig.turn_detection = {
                 type: "server_vad",
-                threshold: 0.5,
-                prefix_padding_ms: 300,
-                silence_duration_ms: 500  // How long to wait after speech stops
+                threshold: 0.8,           // Higher = less sensitive, only prominent speech
+                prefix_padding_ms: 200,   // Less pre-speech capture
+                silence_duration_ms: 700  // Longer pause before committing
             };
             UI.log("[session] direct audio mode with server VAD" + (wantOpenAIAudio ? "" : " (text-only response)"));
         }

@@ -177,7 +177,7 @@ const Speech = (function() {
 
         // Stop existing recognition if active to prevent state corruption
         if (recognition && AppState.getFlag('recognitionActive')) {
-            try { recognition.stop(); } catch {}
+            try { recognition.stop(); } catch (e) { UI.log("[speech] stop error during reinit: " + e.message); }
             AppState.setFlag('recognitionActive', false);
         }
 
@@ -483,7 +483,7 @@ const Speech = (function() {
                 if (recognition && AppState.getFlag('recognitionActive')) {
                     UI.log("[speech] stopping recognition while assistant speaks");
                     recognitionBlocked = true;
-                    try { recognition.stop(); } catch (e) {}
+                    try { recognition.stop(); } catch (e) { UI.log("[speech] stop error during mute: " + e.message); }
                 }
             }
 

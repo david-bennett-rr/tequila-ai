@@ -60,11 +60,11 @@ const AudioMonitor = (function() {
 
     const cleanup = () => {
         if (source) {
-            try { source.disconnect(); } catch {}
+            try { source.disconnect(); } catch (e) { UI.log("[audio] source disconnect error: " + e.message); }
             source = null;
         }
         if (audioContext && audioContext.state !== "closed") {
-            try { audioContext.close(); } catch {}
+            try { audioContext.close(); } catch (e) { UI.log("[audio] context close error: " + e.message); }
         }
         audioContext = null;
         analyser = null;

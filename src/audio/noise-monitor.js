@@ -30,11 +30,11 @@ const NoiseMonitor = (function() {
                 monitorInterval = null;
             }
             if (microphone) {
-                try { microphone.disconnect(); } catch {}
+                try { microphone.disconnect(); } catch (e) { UI.log("[noise] mic disconnect error: " + e.message); }
                 microphone = null;
             }
             if (audioContext && audioContext.state !== 'closed') {
-                try { await audioContext.close(); } catch {}
+                try { await audioContext.close(); } catch (e) { UI.log("[noise] context close error: " + e.message); }
             }
             Utils.stopMediaStream(stream);
             stream = null;
@@ -263,11 +263,11 @@ const NoiseMonitor = (function() {
             monitorInterval = null;
         }
         if (microphone) {
-            try { microphone.disconnect(); } catch {}
+            try { microphone.disconnect(); } catch (e) { UI.log("[noise] mic disconnect error on stop: " + e.message); }
             microphone = null;
         }
         if (audioContext && audioContext.state !== 'closed') {
-            try { audioContext.close(); } catch {}
+            try { audioContext.close(); } catch (e) { UI.log("[noise] context close error on stop: " + e.message); }
         }
         Utils.stopMediaStream(stream);
         stream = null;

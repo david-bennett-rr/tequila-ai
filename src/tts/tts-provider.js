@@ -275,7 +275,7 @@ const TTSProvider = (function() {
                 revokeCurrentAudioUrl();
                 // Wrap pause in try-catch in case audio element is in invalid state
                 if (elevenLabsAudio) {
-                    try { elevenLabsAudio.pause(); } catch {}
+                    try { elevenLabsAudio.pause(); } catch (e) { UI.log("[elevenlabs] pause error on timeout: " + e.message); }
                 }
                 handleTTSError('elevenlabs', 'timeout exceeded');
             });
@@ -343,7 +343,7 @@ const TTSProvider = (function() {
             Watchdog.startTTSTimeout(() => {
                 revokeCurrentAudioUrl();
                 if (elevenLabsAudio) {
-                    try { elevenLabsAudio.pause(); } catch {}
+                    try { elevenLabsAudio.pause(); } catch (e) { UI.log("[local-tts] pause error on timeout: " + e.message); }
                 }
                 handleTTSError('local', 'timeout exceeded');
             });

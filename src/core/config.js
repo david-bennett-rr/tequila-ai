@@ -24,7 +24,7 @@ const Config = (function() {
         AUDIO_SILENCE_THRESHOLD: 500,     // ms of audio silence before end-of-speech
 
         // Audio analysis
-        AUDIO_LEVEL_THRESHOLD: 5,         // minimum average level to detect audio
+        AUDIO_LEVEL_THRESHOLD: 20,        // minimum average level to detect audio (higher = less sensitive)
 
         // Chrome TTS workaround
         CHROME_RESUME_INTERVAL: 10000,    // pause/resume interval for Chrome bug (ms)
