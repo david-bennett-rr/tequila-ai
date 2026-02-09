@@ -9,6 +9,7 @@ const Speech = (function() {
     let retryCount = 0;
     let pendingRetryTimer = null;  // Track pending retry to prevent race conditions
     let postSpeakingCooldownEnd = 0;  // Timestamp: discard all recognition results until this time
+    let pendingUnmuteTimer = null;     // Track pending unmute to cancel on re-mute
 
     // Store handler references for cleanup
     let handlers = {
@@ -185,6 +186,7 @@ const Speech = (function() {
         // Clear any pending timers from previous init
         silenceTimer = Utils.clearTimer(silenceTimer);
         pendingRetryTimer = Utils.clearTimer(pendingRetryTimer);
+        pendingUnmuteTimer = Utils.clearTimer(pendingUnmuteTimer);
         finalTranscript = "";
         recognitionBlocked = false;
         retryCount = 0;
@@ -458,6 +460,7 @@ const Speech = (function() {
         }
         silenceTimer = Utils.clearTimer(silenceTimer);
         pendingRetryTimer = Utils.clearTimer(pendingRetryTimer);
+        pendingUnmuteTimer = Utils.clearTimer(pendingUnmuteTimer);
         finalTranscript = "";
         AppState.setFlag('recognitionActive', false);
         recognitionBlocked = false;
@@ -475,6 +478,8 @@ const Speech = (function() {
 
         if (speaking) {
             UI.log("[speech] assistant started speaking");
+            // Cancel any pending unmute timer (prevents race if assistant speaks again within cooldown)
+            pendingUnmuteTimer = Utils.clearTimer(pendingUnmuteTimer);
             Events.emit(Events.EVENTS.ASSISTANT_SPEAKING_STARTED);
 
             if (AppState.isConnected()) {
@@ -506,7 +511,8 @@ const Speech = (function() {
 
             // Delay mic unmute so tail-end TTS audio doesn't reach the server
             if (!Storage.listenWhileSpeaking) {
-                setTimeout(() => {
+                pendingUnmuteTimer = setTimeout(() => {
+                    pendingUnmuteTimer = null;
                     if (!AppState.getFlag('assistantSpeaking')) {
                         Utils.safeCall(WebRTC, 'setMicMuted', false);
                     }

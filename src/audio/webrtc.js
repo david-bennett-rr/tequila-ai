@@ -8,6 +8,7 @@ const WebRTC = (function() {
     let localStream = null;  // Microphone stream for direct audio mode
     let micMuted = false;    // Track microphone mute state
     const textBuf = Object.create(null);
+    const MAX_TEXTBUF_ENTRIES = 5;  // Max stale response buffers before cleanup
     let responseIdCounter = 0;  // Counter for generating unique fallback IDs
     let currentFallbackId = null;  // Current fallback ID for responses missing response_id
 
@@ -57,6 +58,27 @@ const WebRTC = (function() {
         currentFallbackId = null;
     };
 
+    // Purge stale textBuf entries to prevent memory leaks
+    // Called when response.done never arrives (network drop, reconnect)
+    const purgeTextBuf = () => {
+        const keys = Object.keys(textBuf);
+        if (keys.length > MAX_TEXTBUF_ENTRIES) {
+            // Keep only the most recent entry (last key), delete the rest
+            const staleKeys = keys.slice(0, keys.length - 1);
+            staleKeys.forEach(k => {
+                UI.log("[cleanup] purging stale textBuf entry: " + k);
+                delete textBuf[k];
+            });
+        }
+    };
+
+    // Clear all textBuf entries (used on disconnect/cleanup)
+    const clearTextBuf = () => {
+        Object.keys(textBuf).forEach(k => delete textBuf[k]);
+        currentFallbackId = null;
+        responseIdCounter = 0;
+    };
+
     // Mute/unmute microphone to prevent feedback when assistant speaks
     const setMicMuted = (muted) => {
         if (!localStream) {
@@ -84,6 +106,7 @@ const WebRTC = (function() {
     // Timeout for deadlock prevention in streaming queue
     let processingQueueTimeoutId = null;
     const STREAMING_TTS_TIMEOUT = 30000;  // 30 second timeout for each TTS chunk
+    const MAX_STREAMING_QUEUE = 50;       // Max queued sentences (prevents unbounded growth)
 
     // Reset streaming state for new response
     // Note: Does NOT reset TTSProvider.streamingStopped - that's controlled separately
@@ -106,24 +129,41 @@ const WebRTC = (function() {
     };
 
     // Extract complete sentences from buffer, return { sentences: [], remaining: "" }
+    // Abbreviation-aware: won't split on "Dr.", "U.S.", "3.14", etc.
+    const ABBR_RE = /(?:Dr|Mr|Mrs|Ms|Jr|Sr|St|Prof|Gen|Gov|Sgt|Rev|Inc|Ltd|vs|etc|oz|ml|vol|no|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$/i;
+    const SINGLE_UPPER_RE = /\b[A-Z]$/;
+
     const extractSentences = (text) => {
         const sentences = [];
-        // Match sentences ending with . ! or ? (with optional quotes)
-        const regex = /[^.!?]*[.!?]+["']?\s*/g;
-        let match;
-        let lastIndex = 0;
+        let start = 0;
 
-        while ((match = regex.exec(text)) !== null) {
-            const sentence = match[0].trim();
-            if (sentence.length > 0) {
-                sentences.push(sentence);
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+            if (ch !== '.' && ch !== '!' && ch !== '?') continue;
+
+            // For periods, skip abbreviations and decimal numbers
+            if (ch === '.') {
+                const before = text.slice(start, i).trimEnd();
+                if (ABBR_RE.test(before) || SINGLE_UPPER_RE.test(before)) continue;
+                // Decimal number (e.g. "3.14")
+                if (/\d$/.test(before) && i + 1 < text.length && /\d/.test(text[i + 1])) continue;
             }
-            lastIndex = regex.lastIndex;
+
+            // Consume trailing punctuation, quotes, and whitespace
+            let end = i + 1;
+            while (end < text.length && '.!?'.includes(text[end])) end++;
+            while (end < text.length && (text[end] === '"' || text[end] === "'")) end++;
+            while (end < text.length && text[end] === ' ') end++;
+
+            const sentence = text.slice(start, end).trim();
+            if (sentence) sentences.push(sentence);
+            start = end;
+            i = end - 1;
         }
 
         return {
             sentences,
-            remaining: text.slice(lastIndex)
+            remaining: text.slice(start)
         };
     };
 
@@ -188,11 +228,13 @@ const WebRTC = (function() {
             // Clear the deadlock prevention timeout
             processingQueueTimeoutId = Utils.clearTimer(processingQueueTimeoutId);
 
-            // Ignore callback if generation changed (new response started)
+            // Generation changed (new response started) - release lock and process new queue
             if (currentGen !== streamingGeneration) {
-                UI.log("[streaming] ignoring stale callback (gen " + currentGen + " vs " + streamingGeneration + ")");
-                // CRITICAL: Still release lock for stale callbacks to prevent deadlock
+                UI.log("[streaming] stale callback (gen " + currentGen + " vs " + streamingGeneration + "), processing new queue");
+                isStreamingSpeaking = false;
                 processingQueueLock = false;
+                // CRITICAL: Must process new queue - without this, new sentences never speak
+                processStreamingQueue();
                 return;
             }
             isStreamingSpeaking = false;
@@ -271,9 +313,12 @@ const WebRTC = (function() {
         const { sentences, remaining } = extractSentences(streamingBuffer);
         streamingBuffer = remaining;
 
-        // Queue sentences for TTS
+        // Queue sentences for TTS (cap size to prevent unbounded growth)
         if (sentences.length > 0 && TTSProvider.shouldUseSpeech()) {
             streamingQueue.push(...sentences);
+            while (streamingQueue.length > MAX_STREAMING_QUEUE) {
+                streamingQueue.shift();
+            }
             processStreamingQueue();
         }
     };
@@ -428,6 +473,8 @@ const WebRTC = (function() {
             } else if (msg.part?.type === "audio" && msg.part?.transcript) {
                 textBuf[id] = (textBuf[id] || "") + (msg.part.transcript || "");
             }
+            // Purge stale entries from responses that never got response.done
+            purgeTextBuf();
             return;
         }
 
@@ -499,6 +546,9 @@ const WebRTC = (function() {
 
             // Clean up streaming state to prevent orphaned timeouts
             resetStreamingState();
+
+            // Clear text buffers from responses that never completed
+            clearTextBuf();
 
             // Clear pending transcript to prevent it from being logged to wrong response after reconnect
             pendingUserTranscript = null;
@@ -657,10 +707,16 @@ const WebRTC = (function() {
                     pc.addTrack(track, localStream);
                 });
                 UI.log("[audio] microphone added to WebRTC (direct audio mode)");
+                // Share stream with NoiseMonitor to avoid duplicate mic access
+                if (typeof NoiseMonitor !== 'undefined' && NoiseMonitor.setup) {
+                    NoiseMonitor.setup(localStream).catch(e => UI.log("[noise] shared setup failed: " + e.message));
+                }
             } catch (e) {
                 UI.log("[audio] microphone access failed: " + e.message);
                 UI.toast("Microphone access denied");
-                // Fall back to text mode
+                // Clear stale stream so fallback to browser speech recognition works
+                Utils.stopMediaStream(localStream);
+                localStream = null;
             }
         }
 
@@ -726,6 +782,9 @@ const WebRTC = (function() {
             UI.log("[session] direct audio mode with server VAD" + (wantOpenAIAudio ? "" : " (text-only response)"));
         }
 
+        const sessionController = new AbortController();
+        const sessionTimeoutId = setTimeout(() => sessionController.abort(), 15000);
+
         const createSession = await fetch("https://api.openai.com/v1/realtime/sessions", {
             method: "POST",
             headers: {
@@ -733,8 +792,10 @@ const WebRTC = (function() {
                 "Content-Type": "application/json",
                 "OpenAI-Beta": "realtime=v1"
             },
-            body: JSON.stringify(sessionConfig)
+            body: JSON.stringify(sessionConfig),
+            signal: sessionController.signal
         });
+        clearTimeout(sessionTimeoutId);
 
         if (!createSession.ok) {
             UI.log("[err] session: " + (await createSession.text()));
@@ -761,6 +822,9 @@ const WebRTC = (function() {
             return;
         }
 
+        const sdpController = new AbortController();
+        const sdpTimeoutId = setTimeout(() => sdpController.abort(), 15000);
+
         const sdpRes = await fetch("https://api.openai.com/v1/realtime?model=" + encodeURIComponent(MODEL), {
             method: "POST",
             headers: {
@@ -768,8 +832,10 @@ const WebRTC = (function() {
                 "Content-Type": "application/sdp",
                 "OpenAI-Beta": "realtime=v1"
             },
-            body: offer.sdp
+            body: offer.sdp,
+            signal: sdpController.signal
         });
+        clearTimeout(sdpTimeoutId);
 
         if (!sdpRes.ok) {
             UI.log("[err] sdp: " + (await sdpRes.text()));
@@ -899,8 +965,9 @@ const WebRTC = (function() {
             finalPrompt = historyText + 'Guest: ' + text + '\nYou:';
         }
         if (llmProvider === "local") {
-            // Add user message to history
+            // Add user message to history (trim immediately so failures don't cause unbounded growth)
             conversationHistory.push({ role: 'user', content: text });
+            Utils.trimArray(conversationHistory, MAX_HISTORY);
 
             // Send to local LLM endpoint (Ollama format)
             UI.log("[you] " + text);
@@ -986,6 +1053,11 @@ const WebRTC = (function() {
                         UI.log("[local-llm] error: " + e.message);
                         if (e.message === "Failed to fetch") {
                             UI.log("[local-llm] Hint: Is Ollama running? Try: OLLAMA_ORIGINS=* ollama serve");
+                            // Mark disconnected so isConnected() returns false and triggers reconnect
+                            localLlmConnected = false;
+                            UI.toast("LLM disconnected");
+                            Events.emit(Events.EVENTS.CONNECTION_LOST, { reason: 'local-llm-unreachable' });
+                            scheduleReconnect();
                         }
                     }
                     Events.emit(Events.EVENTS.ERROR, { source: 'local-llm', error: e.message });
@@ -1053,6 +1125,9 @@ const WebRTC = (function() {
         }
         if (typeof TTSProvider !== 'undefined' && TTSProvider.stop) {
             TTSProvider.stop();
+        }
+        if (typeof NoiseMonitor !== 'undefined' && NoiseMonitor.stop) {
+            NoiseMonitor.stop();
         }
 
         // Destroy mic stream on intentional hangup (cleanupConnection preserves it for reconnect)

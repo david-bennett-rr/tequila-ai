@@ -5,6 +5,7 @@ const NoiseMonitor = (function() {
     let analyser = null;
     let microphone = null;
     let stream = null;
+    let streamIsShared = false;  // True if using external stream (don't destroy it on stop)
     let monitorInterval = null;
     let isInitialized = false;  // Track if setup completed successfully
 
@@ -21,7 +22,7 @@ const NoiseMonitor = (function() {
     let adaptiveSilenceThreshold = Config.SILENCE_THRESHOLD;
     let adaptiveMinWords = Config.MIN_WORDS_FOR_SEND;
 
-    const setup = async () => {
+    const setup = async (externalStream) => {
         try {
             // Clean up analysis resources (but preserve stream if still active)
             if (monitorInterval) {
@@ -38,10 +39,18 @@ const NoiseMonitor = (function() {
             audioContext = null;
             analyser = null;
 
-            // Reuse existing stream if still active (avoids re-prompting mic permissions)
-            if (!stream || !stream.active) {
+            // Use external stream if provided (shared with WebRTC to avoid duplicate mic access)
+            if (externalStream && externalStream.active) {
+                if (stream && stream !== externalStream && !streamIsShared) {
+                    Utils.stopMediaStream(stream);
+                }
+                stream = externalStream;
+                streamIsShared = true;
+                UI.log("[noise] using shared microphone stream");
+            } else if (!stream || !stream.active) {
                 Utils.stopMediaStream(stream);
                 stream = null;
+                streamIsShared = false;
                 stream = await navigator.mediaDevices.getUserMedia({
                     audio: {
                         echoCancellation: true,
@@ -273,8 +282,11 @@ const NoiseMonitor = (function() {
         if (audioContext && audioContext.state !== 'closed') {
             try { audioContext.close(); } catch (e) { UI.log("[noise] context close error on stop: " + e.message); }
         }
-        Utils.stopMediaStream(stream);
+        if (!streamIsShared) {
+            Utils.stopMediaStream(stream);
+        }
         stream = null;
+        streamIsShared = false;
         audioContext = null;
         analyser = null;
         isInitialized = false;
