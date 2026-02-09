@@ -494,8 +494,8 @@ const WebRTC = (function() {
         try {
             try { dataChannel?.close(); } catch (e) { UI.log("[cleanup] dataChannel close error: " + e.message); }
             try { pc?.close(); } catch (e) { UI.log("[cleanup] pc close error: " + e.message); }
-            Utils.stopMediaStream(localStream);
-            localStream = null;
+            // NOTE: localStream is intentionally kept alive for reconnect (avoids re-prompting mic permissions)
+            // It is only destroyed in hangup() for intentional disconnect
 
             // Clean up streaming state to prevent orphaned timeouts
             resetStreamingState();
@@ -638,15 +638,21 @@ const WebRTC = (function() {
 
         if (useDirectAudio) {
             // Capture microphone and add to WebRTC connection
+            // Reuse existing stream if still active (avoids re-prompting mic permissions on reconnect)
             try {
-                localStream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
-                        sampleRate: 24000  // OpenAI expects 24kHz
-                    }
-                });
+                if (!localStream || !localStream.active) {
+                    localStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                            sampleRate: 24000  // OpenAI expects 24kHz
+                        }
+                    });
+                    UI.log("[audio] new microphone stream acquired");
+                } else {
+                    UI.log("[audio] reusing existing microphone stream");
+                }
                 localStream.getTracks().forEach(track => {
                     pc.addTrack(track, localStream);
                 });
@@ -1048,6 +1054,10 @@ const WebRTC = (function() {
         if (typeof TTSProvider !== 'undefined' && TTSProvider.stop) {
             TTSProvider.stop();
         }
+
+        // Destroy mic stream on intentional hangup (cleanupConnection preserves it for reconnect)
+        Utils.stopMediaStream(localStream);
+        localStream = null;
 
         cleanupConnection();
         remoteAudio = null;

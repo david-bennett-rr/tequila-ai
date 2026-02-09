@@ -7,6 +7,7 @@ const Prompts = (function() {
     const DEFAULT_RULES = `
         CRITICAL: Keep responses SHORT - 2-3 sentences only, NEVER more.
         CRITICAL: ONLY discuss Cuervo, no other tequila families.
+        CRITICAL: ALWAYS check your Background knowledge FIRST before answering. If the answer is there, use it. Never contradict it or make things up.
         No emojis. Be casual and warm.
         Answer directly, don't over-explain or ramble.
         If asked a yes/no question, start with yes or no.
@@ -49,7 +50,7 @@ const Prompts = (function() {
     const getRealtimeInstructions = () => {
         const p = getPersona();
         const summary = (typeof Summary !== 'undefined' && Summary.summary) ? Summary.summary : '';
-        return `You are ${p.role}. ${p.style} IMPORTANT: Keep ALL replies to 1-2 sentences maximum. Never give long explanations. Be concise and direct.
+        return `You are ${p.role}. ${p.style} IMPORTANT: Keep ALL replies to 1-2 sentences maximum. Never give long explanations. Be concise and direct. ALWAYS check your Background knowledge FIRST before answering any question. If the answer is there, use it. Never contradict it or make things up.
 
 Background knowledge:
 ${summary}`;
@@ -63,7 +64,7 @@ ${summary}`;
 
 Rules: ${p.rules}
 
-Background: {summary}
+Background knowledge: {summary}
 
 {history}${p.userLabel}: {text}
 ${p.assistantLabel}:`;

@@ -23,8 +23,7 @@ const NoiseMonitor = (function() {
 
     const setup = async () => {
         try {
-            // Clean up any existing resources before creating new ones
-            // This prevents memory leaks if setup() is called multiple times
+            // Clean up analysis resources (but preserve stream if still active)
             if (monitorInterval) {
                 clearInterval(monitorInterval);
                 monitorInterval = null;
@@ -36,19 +35,24 @@ const NoiseMonitor = (function() {
             if (audioContext && audioContext.state !== 'closed') {
                 try { await audioContext.close(); } catch (e) { UI.log("[noise] context close error: " + e.message); }
             }
-            Utils.stopMediaStream(stream);
-            stream = null;
             audioContext = null;
             analyser = null;
 
-            // Request microphone access
-            stream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true
-                }
-            });
+            // Reuse existing stream if still active (avoids re-prompting mic permissions)
+            if (!stream || !stream.active) {
+                Utils.stopMediaStream(stream);
+                stream = null;
+                stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
+                UI.log("[noise] new microphone stream acquired");
+            } else {
+                UI.log("[noise] reusing existing microphone stream");
+            }
 
             audioContext = new (window.AudioContext || window.webkitAudioContext)();
             analyser = audioContext.createAnalyser();

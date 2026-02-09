@@ -8,6 +8,7 @@ const Speech = (function() {
     let recognitionBlocked = false;
     let retryCount = 0;
     let pendingRetryTimer = null;  // Track pending retry to prevent race conditions
+    let postSpeakingCooldownEnd = 0;  // Timestamp: discard all recognition results until this time
 
     // Store handler references for cleanup
     let handlers = {
@@ -254,6 +255,11 @@ const Speech = (function() {
                 }
             }
 
+            // Discard results during post-speaking cooldown (prevents self-hearing)
+            if (postSpeakingCooldownEnd && Date.now() < postSpeakingCooldownEnd) {
+                return;
+            }
+
             // Check for interruption while assistant is speaking
             if (AppState.getFlag('assistantSpeaking')) {
                 const heardText = (currentFinal + interimTranscript).trim();
@@ -495,11 +501,17 @@ const Speech = (function() {
             UI.log("[speech] assistant stopped speaking");
             Events.emit(Events.EVENTS.ASSISTANT_SPEAKING_STOPPED);
 
-            // Unmute mic if it was muted (for direct audio mode)
+            // Set cooldown to prevent self-hearing (mic picks up tail-end of TTS audio)
+            postSpeakingCooldownEnd = Date.now() + 800;
+
+            // Delay mic unmute so tail-end TTS audio doesn't reach the server
             if (!Storage.listenWhileSpeaking) {
-                Utils.safeCall(WebRTC, 'setMicMuted', false);
+                setTimeout(() => {
+                    if (!AppState.getFlag('assistantSpeaking')) {
+                        Utils.safeCall(WebRTC, 'setMicMuted', false);
+                    }
+                }, 800);
             }
-            // Recognition restart is handled below in the shouldBeListening block
 
             finalTranscript = "";
             retryCount = 0;
@@ -511,19 +523,18 @@ const Speech = (function() {
                     AppState.transition(AppState.STATES.LISTENING, 'assistant finished');
                 }
 
-                // Clear blocked state and restart recognition if needed
+                // Clear blocked state and restart recognition after cooldown
                 recognitionBlocked = false;
                 if (!AppState.getFlag('recognitionActive') && recognition) {
-                    UI.log("[speech] restarting recognition after assistant finished");
+                    UI.log("[speech] restarting recognition after assistant finished (800ms cooldown)");
                     setTimeout(() => {
-                        // Verify recognition still exists (could be nullified by stop())
                         if (recognition &&
                             AppState.getFlag('shouldBeListening') &&
                             !AppState.getFlag('assistantSpeaking') &&
                             !AppState.getFlag('recognitionActive')) {
                             tryStartRecognition();
                         }
-                    }, 300);  // Shorter delay for quicker restart
+                    }, 800);
                 }
             } else {
                 UI.setTranscript("Click to start listening...");
