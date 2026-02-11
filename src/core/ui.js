@@ -7,25 +7,34 @@ const UI = (function() {
 
   // Log rotation constants
   const MAX_LOG_LINES = 500;  // Maximum lines to keep in log
-  const LOG_TRIM_AMOUNT = 100;  // Lines to remove when trimming
 
   // Exchange history limit
   const MAX_EXCHANGES = 50;  // Maximum exchanges to keep in DOM
 
+  const getLogClass = (s) => {
+    if (/\[(err|error)\]/.test(s) || /\bCRITICAL\b|TIMEOUT\b|failed|error:/i.test(s)) return "log-error";
+    if (/\bwarn|reconnect/i.test(s) || /\[watchdog\]/.test(s)) return "log-warn";
+    if (/\[you\]/.test(s)) return "log-user";
+    if (/\[assistant\]/.test(s)) return "log-assistant";
+    if (/\[sys\]/.test(s) || /connected|initialized/.test(s)) return "log-sys";
+    return "";
+  };
+
   const log = (s) => {
     const logEl = $("log");
-    if (logEl) {
-      logEl.textContent += s + "\n";
+    if (!logEl) return;
 
-      // Log rotation: trim old entries when exceeding max
-      const lines = logEl.textContent.split("\n");
-      if (lines.length > MAX_LOG_LINES) {
-        // Remove oldest lines
-        logEl.textContent = lines.slice(LOG_TRIM_AMOUNT).join("\n");
-      }
+    const line = document.createElement("div");
+    line.className = "log-line " + getLogClass(s);
+    line.textContent = s;
+    logEl.appendChild(line);
 
-      logEl.scrollTop = logEl.scrollHeight;
+    // Log rotation: remove oldest entries when exceeding max
+    while (logEl.children.length > MAX_LOG_LINES) {
+      logEl.removeChild(logEl.firstChild);
     }
+
+    logEl.scrollTop = logEl.scrollHeight;
   };
 
   const toast = (s) => {

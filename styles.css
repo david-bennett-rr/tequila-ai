@@ -703,6 +703,13 @@ select {
   overflow-y: auto;
 }
 
+.log-line { color: #00ff00; }
+.log-error { color: #ff4444; font-weight: bold; }
+.log-warn { color: #ffaa00; }
+.log-user { color: #42a5f5; }
+.log-assistant { color: #ce93d8; }
+.log-sys { color: #66bb6a; }
+
 /* Animations */
 @keyframes pulse {
   0%, 100% {
