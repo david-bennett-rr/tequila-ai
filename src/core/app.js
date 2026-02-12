@@ -233,7 +233,7 @@ const App = (function() {
                 }
 
                 Storage.apiKey = apiKey ? apiKey.value.trim() : "";
-                Storage.model = model ? (model.value.trim() || "gpt-realtime") : "gpt-realtime";
+                Storage.model = model ? (model.value.trim() || "gpt-4o-realtime-preview-2024-12-17") : "gpt-4o-realtime-preview-2024-12-17";
                 Storage.voice = voice ? voice.value : "alloy";
                 Storage.elevenLabsKey = elevenLabsKey ? elevenLabsKey.value.trim() : "";
 

@@ -213,8 +213,6 @@ const WebRTC = (function() {
             return;
         }
 
-        const provider = TTSProvider.getProvider();
-
         // Track if onComplete has been called to prevent double-execution
         let completeCalled = false;
 
@@ -242,37 +240,44 @@ const WebRTC = (function() {
             processStreamingQueue();
         };
 
-        // Set up deadlock prevention timeout
-        // If onComplete doesn't fire within timeout, force release the lock
-        processingQueueTimeoutId = setTimeout(() => {
-            if (!completeCalled) {
-                UI.log("[streaming] TIMEOUT: TTS callback did not fire in " + STREAMING_TTS_TIMEOUT + "ms, forcing lock release");
-                // Stop any potentially stuck audio
-                Utils.safeCall(TTSProvider, 'stop');
-                onComplete();  // This will release the lock and continue processing
+        try {
+            const provider = TTSProvider.getProvider();
+
+            // Set up deadlock prevention timeout
+            // If onComplete doesn't fire within timeout, force release the lock
+            processingQueueTimeoutId = setTimeout(() => {
+                if (!completeCalled) {
+                    UI.log("[streaming] TIMEOUT: TTS callback did not fire in " + STREAMING_TTS_TIMEOUT + "ms, forcing lock release");
+                    // Stop any potentially stuck audio
+                    Utils.safeCall(TTSProvider, 'stop');
+                    onComplete();  // This will release the lock and continue processing
+                }
+            }, STREAMING_TTS_TIMEOUT);
+
+            // NOTE: Lock is intentionally held during async TTS call.
+            // The isStreamingSpeaking flag AND the lock together prevent re-entry.
+            // Lock is released in onComplete callback when TTS finishes.
+
+            // Use streaming-aware TTS that calls back when done
+            // Note: These are async functions but we don't await - they handle their own errors
+            // and call onComplete when done. We add .catch() to prevent unhandled rejections.
+            if (provider === "elevenlabs") {
+                TTSProvider.speakWithElevenLabsStreaming(sentence, onComplete).catch(e => {
+                    UI.log("[streaming] elevenlabs error: " + e.message);
+                    onComplete();
+                });
+            } else if (provider === "local") {
+                TTSProvider.speakWithLocalTTSStreaming(sentence, onComplete).catch(e => {
+                    UI.log("[streaming] local TTS error: " + e.message);
+                    onComplete();
+                });
+            } else {
+                // Fallback - no streaming callback support, use setTimeout to avoid stack overflow
+                setTimeout(onComplete, 0);
             }
-        }, STREAMING_TTS_TIMEOUT);
-
-        // NOTE: Lock is intentionally held during async TTS call.
-        // The isStreamingSpeaking flag AND the lock together prevent re-entry.
-        // Lock is released in onComplete callback when TTS finishes.
-
-        // Use streaming-aware TTS that calls back when done
-        // Note: These are async functions but we don't await - they handle their own errors
-        // and call onComplete when done. We add .catch() to prevent unhandled rejections.
-        if (provider === "elevenlabs") {
-            TTSProvider.speakWithElevenLabsStreaming(sentence, onComplete).catch(e => {
-                UI.log("[streaming] elevenlabs error: " + e.message);
-                onComplete();
-            });
-        } else if (provider === "local") {
-            TTSProvider.speakWithLocalTTSStreaming(sentence, onComplete).catch(e => {
-                UI.log("[streaming] local TTS error: " + e.message);
-                onComplete();
-            });
-        } else {
-            // Fallback - no streaming callback support, use setTimeout to avoid stack overflow
-            setTimeout(onComplete, 0);
+        } catch (e) {
+            UI.log("[err] streaming queue: " + e.message);
+            onComplete();
         }
     };
 
@@ -293,7 +298,7 @@ const WebRTC = (function() {
                 UI.log("[streaming] new response detected: " + responseId + " (was: " + streamingResponseId + ")");
                 // Stop any currently playing audio before starting new response
                 if (typeof TTSProvider !== 'undefined' && TTSProvider.stop) {
-                    TTSProvider.stop();
+                    try { TTSProvider.stop(); } catch (e) { UI.log("[err] TTSProvider.stop: " + e.message); }
                 }
             }
             resetStreamingState();

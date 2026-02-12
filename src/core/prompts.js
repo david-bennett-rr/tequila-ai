@@ -3,7 +3,7 @@ const Prompts = (function() {
 
     // ============= PERSONA =============
     // Static defaults used when Storage isn't available yet
-    const DEFAULT_STYLE = "Be BRIEF. 2-3 sentences MAX. Speak 95% English, but mix in a touch of Spanish on occasion.";
+    const DEFAULT_STYLE = "Be BRIEF. 2-3 sentences MAX." // Speak 95% English, but mix in a touch of Spanish on occasion.";
     const DEFAULT_RULES = `
         CRITICAL: Keep responses SHORT - 2-3 sentences only, NEVER more.
         CRITICAL: ONLY discuss Cuervo, no other tequila families.
@@ -41,8 +41,6 @@ const Prompts = (function() {
         };
     };
 
-    // For backwards compatibility - returns current persona
-    const PERSONA = getPersona();
 
     // ============= TEMPLATE BUILDERS =============
 
@@ -90,8 +88,8 @@ ${p.name}:`;
     };
 
     return {
-        PERSONA,  // For backwards compat (snapshot at load time)
-        getPersona,  // Dynamic getter
+        get PERSONA() { return getPersona(); },
+        getPersona,
         get REALTIME_INSTRUCTIONS() { return getRealtimeInstructions(); },
         buildInstructPrompt,
         buildBasePrompt
