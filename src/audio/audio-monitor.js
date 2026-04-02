@@ -24,6 +24,11 @@ const AudioMonitor = (function() {
             cleanup();
 
             audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            // iOS may create contexts in suspended state; resume immediately
+            // (will succeed because user has already interacted via Connect button)
+            if (audioContext.state === 'suspended') {
+                audioContext.resume().catch(e => UI.log("[audio] analyser context resume failed: " + e.message));
+            }
             analyser = audioContext.createAnalyser();
             analyser.fftSize = 256;
             analyser.smoothingTimeConstant = 0.8;

@@ -26,12 +26,22 @@ window.onunhandledrejection = (event) => {
     event.preventDefault();
 };
 
+// Initialize AudioUnlock early so gesture listeners are in place before any user interaction
+if (typeof AudioUnlock !== 'undefined') {
+    AudioUnlock.init();
+}
+
 // Handle page visibility changes (kiosk may sleep/wake)
 document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
         console.log("[global] Page became visible, checking connections...");
         if (typeof UI !== 'undefined' && UI.log) {
             UI.log("[sys] page visible, checking status...");
+        }
+        // iOS suspends AudioContext when the page is backgrounded or the device locks.
+        // Re-resume the shared context so audio playback works immediately on return.
+        if (typeof AudioUnlock !== 'undefined') {
+            AudioUnlock.ensureRunning();
         }
         // The WebRTC connection monitor (via Watchdog) will handle reconnection if needed
     }

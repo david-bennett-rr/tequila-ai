@@ -23,7 +23,11 @@ const TTSProvider = (function() {
     const initAudioProcessing = () => {
         if (audioContext) return;
         try {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            // Use shared AudioContext from AudioUnlock (already unlocked on iOS via user gesture)
+            // Falls back to creating own context on desktop if AudioUnlock isn't available
+            audioContext = (typeof AudioUnlock !== 'undefined')
+                ? AudioUnlock.getAudioContext()
+                : new (window.AudioContext || window.webkitAudioContext)();
 
             // Compressor to tame loud peaks
             compressor = audioContext.createDynamicsCompressor();
@@ -58,9 +62,14 @@ const TTSProvider = (function() {
             return audioElement.play();
         }
 
-        // Resume audio context if suspended (browser autoplay policy)
+        // Resume audio context if suspended (browser autoplay policy / iOS background return)
         if (audioContext.state === 'suspended') {
-            await audioContext.resume();
+            // Try AudioUnlock first (may have a more recent user gesture)
+            if (typeof AudioUnlock !== 'undefined') {
+                await AudioUnlock.ensureRunning();
+            } else {
+                await audioContext.resume();
+            }
         }
 
         // Only connect once per audio element (createMediaElementSource can only be called once)

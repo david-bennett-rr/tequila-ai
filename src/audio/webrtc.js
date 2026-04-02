@@ -684,6 +684,12 @@ const WebRTC = (function() {
         pc.ontrack = (e) => {
             const [stream] = e.streams;
             remoteAudio.srcObject = stream;
+            // Explicitly call play() for iOS - the autoplay attribute alone is
+            // insufficient on mobile Safari even for WebRTC remote streams.
+            // AudioUnlock will have already unlocked audio from the Connect button gesture.
+            remoteAudio.play().catch(err => {
+                UI.log("[audio] remote play deferred: " + err.message);
+            });
             UI.log("[audio] remote track received");
             AudioMonitor.setup(stream);
         };

@@ -64,6 +64,10 @@ const NoiseMonitor = (function() {
             }
 
             audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            // iOS may create contexts in suspended state; resume immediately
+            if (audioContext.state === 'suspended') {
+                audioContext.resume().catch(e => UI.log("[noise] context resume failed: " + e.message));
+            }
             analyser = audioContext.createAnalyser();
             analyser.fftSize = 256;
             analyser.smoothingTimeConstant = 0.8;
