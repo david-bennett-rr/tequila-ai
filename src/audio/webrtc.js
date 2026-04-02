@@ -34,10 +34,16 @@ const WebRTC = (function() {
         if (actualId) {
             // If we have an actual ID, check if we were using a fallback
             // and migrate the buffer to the real ID
-            if (currentFallbackId && !textBuf[actualId] && textBuf[currentFallbackId]) {
-                textBuf[actualId] = textBuf[currentFallbackId];
+            if (currentFallbackId && textBuf[currentFallbackId]) {
+                if (textBuf[actualId]) {
+                    // Both exist — merge fallback text into the real entry
+                    textBuf[actualId].text = textBuf[currentFallbackId].text + textBuf[actualId].text;
+                    UI.log("[id] merged fallback " + currentFallbackId + " into " + actualId);
+                } else {
+                    textBuf[actualId] = textBuf[currentFallbackId];
+                    UI.log("[id] migrated fallback " + currentFallbackId + " -> " + actualId);
+                }
                 delete textBuf[currentFallbackId];
-                UI.log("[id] migrated fallback " + currentFallbackId + " -> " + actualId);
             }
             // Clear fallback since we now have real ID
             currentFallbackId = null;
@@ -63,10 +69,12 @@ const WebRTC = (function() {
     const purgeTextBuf = () => {
         const keys = Object.keys(textBuf);
         if (keys.length > MAX_TEXTBUF_ENTRIES) {
-            // Keep only the most recent entry (last key), delete the rest
+            // Keep only the most recent entry by timestamp, delete the rest.
+            // Timestamp ordering is reliable even if messages arrived out-of-order.
+            keys.sort((a, b) => (textBuf[a].ts || 0) - (textBuf[b].ts || 0));
             const staleKeys = keys.slice(0, keys.length - 1);
             staleKeys.forEach(k => {
-                UI.log("[cleanup] purging stale textBuf entry: " + k);
+                UI.log("[cleanup] purging stale textBuf entry: " + k + " (age " + (Date.now() - (textBuf[k].ts || 0)) + "ms)");
                 delete textBuf[k];
             });
         }
@@ -320,10 +328,16 @@ const WebRTC = (function() {
 
         // Queue sentences for TTS (cap size to prevent unbounded growth)
         if (sentences.length > 0 && TTSProvider.shouldUseSpeech()) {
-            streamingQueue.push(...sentences);
-            while (streamingQueue.length > MAX_STREAMING_QUEUE) {
-                streamingQueue.shift();
+            // Trim queue BEFORE pushing so total never exceeds MAX_STREAMING_QUEUE
+            const available = MAX_STREAMING_QUEUE - streamingQueue.length;
+            if (sentences.length > available) {
+                const dropped = sentences.length - available;
+                UI.log("[streaming] queue full, dropping " + dropped + " oldest queued sentence(s)");
+                while (streamingQueue.length + sentences.length > MAX_STREAMING_QUEUE) {
+                    streamingQueue.shift();
+                }
             }
+            streamingQueue.push(...sentences);
             processStreamingQueue();
         }
     };
@@ -473,10 +487,13 @@ const WebRTC = (function() {
 
         if (t === "response.content_part.done") {
             const id = getResponseId(msg);
+            if (!textBuf[id]) {
+                textBuf[id] = { text: "", ts: Date.now() };
+            }
             if (msg.part?.type === "text") {
-                textBuf[id] = (textBuf[id] || "") + (msg.part.text || "");
+                textBuf[id].text += (msg.part.text || "");
             } else if (msg.part?.type === "audio" && msg.part?.transcript) {
-                textBuf[id] = (textBuf[id] || "") + (msg.part.transcript || "");
+                textBuf[id].text += (msg.part.transcript || "");
             }
             // Purge stale entries from responses that never got response.done
             purgeTextBuf();
@@ -491,7 +508,8 @@ const WebRTC = (function() {
 
         if (t === "response.done" && msg.response) {
             const id = getResponseId(msg);
-            const assistantText = (textBuf[id] || "").trim();
+            const entry = textBuf[id];
+            const assistantText = (entry ? entry.text : "").trim();
             delete textBuf[id];
             clearCurrentFallback();  // Reset fallback for next response
 
@@ -572,6 +590,18 @@ const WebRTC = (function() {
                 try { unsubUserInterrupted(); } catch (e) { UI.log("[cleanup] unsubUserInterrupted error: " + e.message); }
                 unsubUserInterrupted = null;
             }
+            if (remoteAudio) {
+                Utils.stopAudio(remoteAudio);
+                try { remoteAudio.srcObject = null; } catch (e) { UI.log("[cleanup] remoteAudio srcObject clear error: " + e.message); }
+                try {
+                    remoteAudio.removeAttribute("src");
+                    if (typeof remoteAudio.load === "function") {
+                        remoteAudio.load();
+                    }
+                } catch (e) {
+                    UI.log("[cleanup] remoteAudio reset error: " + e.message);
+                }
+            }
             micMuted = false;
             pc = null;
             dataChannel = null;
@@ -612,6 +642,11 @@ const WebRTC = (function() {
             // If transition failed, force it for recovery (kiosk reliability)
             UI.log("[sys] forcing CONNECTING state for recovery");
             AppState.forceState(AppState.STATES.CONNECTING, 'forced for recovery');
+        }
+
+        // Prime reusable audio elements while we're still inside the Connect tap.
+        if (typeof TTSProvider !== 'undefined' && TTSProvider.primeAudioElements) {
+            TTSProvider.primeAudioElements();
         }
 
         if (llmProvider === "local") {
@@ -678,8 +713,16 @@ const WebRTC = (function() {
             }
         };
 
-        remoteAudio = new Audio();
-        remoteAudio.autoplay = true;
+        if (!remoteAudio) {
+            remoteAudio = new Audio();
+            remoteAudio.autoplay = true;
+            remoteAudio.preload = "auto";
+            remoteAudio.playsInline = true;
+            remoteAudio.setAttribute("playsinline", "");
+        }
+        if (typeof AudioUnlock !== 'undefined' && AudioUnlock.primeMediaElement) {
+            AudioUnlock.primeMediaElement(remoteAudio, "remote-audio");
+        }
 
         pc.ontrack = (e) => {
             const [stream] = e.streams;
@@ -746,8 +789,9 @@ const WebRTC = (function() {
             }
         };
         dataChannel.onerror = (e) => {
-            UI.log("[dc] error " + (e?.message || e));
-            Events.emit(Events.EVENTS.ERROR, { source: 'datachannel', error: e?.message || e });
+            const errDetail = e?.error?.message || e?.message || String(e);
+            UI.log("[dc] error: " + errDetail);
+            Events.emit(Events.EVENTS.ERROR, { source: 'datachannel', error: errDetail });
             // Trigger reconnect on error
             if (AppState.getFlag('shouldBeConnected')) {
                 scheduleReconnect();
@@ -809,10 +853,12 @@ const WebRTC = (function() {
         clearTimeout(sessionTimeoutId);
 
         if (!createSession.ok) {
-            UI.log("[err] session: " + (await createSession.text()));
+            const errBody = await createSession.text();
+            UI.log("[err] session creation failed (HTTP " + createSession.status + "): " + errBody);
             UI.toast("session failed");
-            Events.emit(Events.EVENTS.CONNECTION_FAILED, { error: 'session creation failed' });
-            // Trigger reconnect on session failure
+            Events.emit(Events.EVENTS.CONNECTION_FAILED, { error: 'session creation failed', status: createSession.status });
+            // Clean up the PeerConnection we created at line 665 before scheduling reconnect
+            cleanupConnection();
             if (AppState.getFlag('shouldBeConnected')) {
                 scheduleReconnect();
             }
@@ -824,9 +870,10 @@ const WebRTC = (function() {
 
         // Validate token before proceeding
         if (!token) {
-            UI.log("[err] session: no client_secret in response");
+            UI.log("[err] session: response missing client_secret (got keys: " + Object.keys(client_secret || {}).join(", ") + ")");
             UI.toast("session failed - no token");
             Events.emit(Events.EVENTS.CONNECTION_FAILED, { error: 'no client_secret in session response' });
+            cleanupConnection();
             if (AppState.getFlag('shouldBeConnected')) {
                 scheduleReconnect();
             }
@@ -849,10 +896,11 @@ const WebRTC = (function() {
         clearTimeout(sdpTimeoutId);
 
         if (!sdpRes.ok) {
-            UI.log("[err] sdp: " + (await sdpRes.text()));
+            const sdpErr = await sdpRes.text();
+            UI.log("[err] SDP exchange failed (HTTP " + sdpRes.status + "): " + sdpErr);
             UI.toast("SDP failed");
-            Events.emit(Events.EVENTS.CONNECTION_FAILED, { error: 'SDP exchange failed' });
-            // Trigger reconnect on SDP failure
+            Events.emit(Events.EVENTS.CONNECTION_FAILED, { error: 'SDP exchange failed', status: sdpRes.status });
+            cleanupConnection();
             if (AppState.getFlag('shouldBeConnected')) {
                 scheduleReconnect();
             }
@@ -928,9 +976,12 @@ const WebRTC = (function() {
         try {
             await connect();
         } catch (e) {
-            UI.log("[sys] connection error: " + e.message);
+            const errMsg = e.name === 'AbortError' ? 'request timed out' : e.message;
+            UI.log("[sys] connection error (" + e.name + "): " + errMsg);
             UI.toast("connection failed");
-            Events.emit(Events.EVENTS.CONNECTION_FAILED, { error: e.message });
+            Events.emit(Events.EVENTS.CONNECTION_FAILED, { error: errMsg, type: e.name });
+            // Ensure any half-built PeerConnection is cleaned up
+            cleanupConnection();
             AppState.transition(AppState.STATES.ERROR, 'connection error');
             if (AppState.getFlag('shouldBeConnected')) {
                 scheduleReconnect();
@@ -1146,7 +1197,6 @@ const WebRTC = (function() {
         localStream = null;
 
         cleanupConnection();
-        remoteAudio = null;
         localLlmConnected = false;
 
         AppState.transition(AppState.STATES.IDLE, 'user hangup');

@@ -1,6 +1,7 @@
 // Events Module - Simple event bus for decoupled communication
 const Events = (function() {
     const listeners = {};
+    const MAX_LISTENERS_PER_EVENT = 10;  // Warn if exceeded (likely a leak)
 
     // Subscribe to an event
     const on = (event, callback) => {
@@ -9,9 +10,16 @@ const Events = (function() {
         }
         listeners[event].push(callback);
 
+        // Warn on potential listener leak (e.g. forgetting to unsubscribe on reconnect)
+        if (listeners[event].length > MAX_LISTENERS_PER_EVENT) {
+            console.warn("[events] possible listener leak: " + event + " has " + listeners[event].length + " listeners (max expected " + MAX_LISTENERS_PER_EVENT + ")");
+        }
+
         // Return unsubscribe function
         return () => {
-            listeners[event] = listeners[event].filter(cb => cb !== callback);
+            if (listeners[event]) {
+                listeners[event] = listeners[event].filter(cb => cb !== callback);
+            }
         };
     };
 
@@ -22,7 +30,7 @@ const Events = (function() {
                 try {
                     callback(data);
                 } catch (e) {
-                    console.error("[events] Error in listener for " + event + ":", e);
+                    console.error("[events] Error in " + event + " listener:", e.message || e);
                 }
             });
         }

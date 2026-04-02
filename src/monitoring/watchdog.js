@@ -3,6 +3,8 @@ const Watchdog = (function() {
     // Registry of all active watchdogs
     const watchdogs = {};
 
+    const MAX_CONSECUTIVE_ERRORS = 5;  // Auto-stop watchdog after this many consecutive callback errors
+
     // Create or restart a watchdog
     const start = (name, callback, interval, options = {}) => {
         // Stop existing watchdog with this name
@@ -15,7 +17,8 @@ const Watchdog = (function() {
             startTime: Date.now(),
             maxDuration: options.maxDuration || null,  // Optional max duration before auto-stop
             onTimeout: options.onTimeout || null,       // Called if maxDuration exceeded
-            timer: null
+            timer: null,
+            consecutiveErrors: 0
         };
 
         watchdog.timer = setInterval(() => {
@@ -35,8 +38,15 @@ const Watchdog = (function() {
 
                 // Execute the watchdog callback
                 callback();
+                watchdog.consecutiveErrors = 0;  // Reset on success
             } catch (e) {
-                UI.log("[watchdog] " + name + " error: " + e.message);
+                watchdog.consecutiveErrors++;
+                UI.log("[watchdog] " + name + " error (" + watchdog.consecutiveErrors + "/" + MAX_CONSECUTIVE_ERRORS + "): " + e.message);
+                if (watchdog.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+                    UI.log("[watchdog] " + name + " auto-stopped: " + MAX_CONSECUTIVE_ERRORS + " consecutive errors");
+                    Events.emit(Events.EVENTS.ERROR, { source: 'watchdog', error: name + ' auto-stopped after repeated errors' });
+                    stop(name);
+                }
             }
         }, interval);
 

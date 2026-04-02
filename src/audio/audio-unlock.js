@@ -16,6 +16,8 @@ const AudioUnlock = (function() {
     let sharedContext = null;
     let unlocked = false;
     let unlockResolvers = [];
+    const primedElements = new WeakSet();
+    const SILENT_WAV_DATA_URI = "data:audio/wav;base64,UklGRmQGAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YUAGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     // Get (or create) the shared AudioContext.
     // Other modules should call this instead of creating their own playback context.
@@ -84,6 +86,78 @@ const AudioUnlock = (function() {
         return new Promise(resolve => unlockResolvers.push(resolve));
     };
 
+    // Prime a specific media element while we still have a user gesture.
+    // WebKit grants autoplay permission per element, so callers should reuse
+    // the same element later rather than creating a new one for playback.
+    const primeMediaElement = (element, label = "media") => {
+        if (!element || primedElements.has(element)) {
+            return Promise.resolve(true);
+        }
+
+        unlock();
+
+        try {
+            element.autoplay = true;
+            element.preload = "auto";
+            element.playsInline = true;
+            if (element.setAttribute) {
+                element.setAttribute("playsinline", "");
+            }
+        } catch (e) {
+            console.warn("[audio-unlock] failed to configure " + label + ":", e.message);
+        }
+
+        // Only prime fresh elements - callers should keep reusing them later.
+        if (element.src || element.currentSrc || element.srcObject) {
+            primedElements.add(element);
+            return Promise.resolve(true);
+        }
+
+        element.src = SILENT_WAV_DATA_URI;
+
+        const cleanup = () => {
+            try { element.pause(); } catch (e) {}
+            try { element.currentTime = 0; } catch (e) {}
+            try { element.removeAttribute("src"); } catch (e) {}
+            try {
+                if ("srcObject" in element) {
+                    element.srcObject = null;
+                }
+            } catch (e) {}
+            try {
+                if (typeof element.load === "function") {
+                    element.load();
+                }
+            } catch (e) {}
+        };
+
+        try {
+            const playPromise = element.play();
+            primedElements.add(element);
+
+            if (playPromise && typeof playPromise.then === "function") {
+                return playPromise.then(() => {
+                    cleanup();
+                    console.log("[audio-unlock] primed " + label);
+                    return true;
+                }).catch(err => {
+                    primedElements.delete(element);
+                    cleanup();
+                    console.warn("[audio-unlock] failed to prime " + label + ":", err?.message || err);
+                    return false;
+                });
+            }
+
+            cleanup();
+            console.log("[audio-unlock] primed " + label);
+            return Promise.resolve(true);
+        } catch (e) {
+            cleanup();
+            console.warn("[audio-unlock] failed to start priming " + label + ":", e.message);
+            return Promise.resolve(false);
+        }
+    };
+
     // Attach gesture listeners. Uses capture phase so we unlock BEFORE any
     // button handler fires (e.g. Connect button), ensuring the AudioContext is
     // running by the time WebRTC or TTS code executes.
@@ -108,6 +182,7 @@ const AudioUnlock = (function() {
         getAudioContext,
         ensureRunning,
         waitForUnlock,
+        primeMediaElement,
         get unlocked() { return unlocked; }
     };
 })();

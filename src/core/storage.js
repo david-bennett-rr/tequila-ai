@@ -21,7 +21,13 @@ const Storage = (function() {
         try {
             localStorage.setItem(key, value);
         } catch (e) {
-            console.error("[storage] write error for " + key + ":", e.message);
+            // QuotaExceededError means localStorage is full — log clearly so it's diagnosable
+            const isQuota = e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014;
+            if (isQuota) {
+                console.error("[storage] QUOTA EXCEEDED writing " + key + " (" + (value || "").length + " chars) — using in-memory fallback. Data will be lost on reload.");
+            } else {
+                console.error("[storage] write error for " + key + ":", e.message);
+            }
             // Value is still in memoryCache, so the app continues working
         }
     };

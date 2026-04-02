@@ -10,6 +10,7 @@ const TTSProvider = (function() {
     let activeStreamingAudio = null;
     let activeStreamingAudioUrl = null;  // Track URL separately for cleanup on stop
     let streamingStopped = false;  // Flag to prevent callbacks after stop
+    let streamingAudioElement = null;
 
     // Track all active audio elements for comprehensive cleanup
     let allActiveAudioElements = new Set();
@@ -53,6 +54,36 @@ const TTSProvider = (function() {
 
     // Track which audio elements have been connected to avoid double-connect error
     const connectedElements = new WeakSet();
+    const cleanupTrackedElements = new WeakSet();
+
+    const configureAudioElement = (audio) => {
+        if (!audio) return audio;
+        audio.autoplay = true;
+        audio.preload = "auto";
+        audio.playsInline = true;
+        audio.setAttribute("playsinline", "");
+        return audio;
+    };
+
+    const getMainAudioElement = () => {
+        if (!elevenLabsAudio) {
+            elevenLabsAudio = configureAudioElement(new Audio());
+        }
+        return elevenLabsAudio;
+    };
+
+    const getStreamingAudioElement = () => {
+        if (!streamingAudioElement) {
+            streamingAudioElement = configureAudioElement(new Audio());
+        }
+        return streamingAudioElement;
+    };
+
+    const primeAudioElements = () => {
+        if (typeof AudioUnlock === 'undefined' || !AudioUnlock.primeMediaElement) return;
+        AudioUnlock.primeMediaElement(getMainAudioElement(), "tts-main");
+        AudioUnlock.primeMediaElement(getStreamingAudioElement(), "tts-stream");
+    };
 
     // Play audio through the compressor chain
     const playWithLimiter = async (audioElement) => {
@@ -121,6 +152,7 @@ const TTSProvider = (function() {
         // Stop active streaming audio and revoke its URL to prevent memory leak
         Utils.stopAudio(activeStreamingAudio);
         activeStreamingAudio = null;
+        Utils.stopAudio(streamingAudioElement);
         if (activeStreamingAudioUrl) {
             URL.revokeObjectURL(activeStreamingAudioUrl);
             activeStreamingAudioUrl = null;
@@ -137,12 +169,15 @@ const TTSProvider = (function() {
     // Track an audio element for cleanup
     const trackAudioElement = (audio) => {
         allActiveAudioElements.add(audio);
-        // Auto-remove when ended or errored
+        if (cleanupTrackedElements.has(audio)) return;
+
+        // Reused audio elements keep the same cleanup listeners for their lifetime.
         const cleanup = () => {
             allActiveAudioElements.delete(audio);
         };
-        audio.addEventListener('ended', cleanup, { once: true });
-        audio.addEventListener('error', cleanup, { once: true });
+        audio.addEventListener('ended', cleanup);
+        audio.addEventListener('error', cleanup);
+        cleanupTrackedElements.add(audio);
     };
 
     // Helper to emit TTS events
@@ -312,11 +347,11 @@ const TTSProvider = (function() {
 
             const audioBlob = await response.blob();
             audioUrl = URL.createObjectURL(audioBlob);
+            // Revoke any stale URL that accumulated while the fetch was in-flight
+            revokeCurrentAudioUrl();
             currentAudioUrl = audioUrl;
 
-            if (!elevenLabsAudio) {
-                elevenLabsAudio = new Audio();
-            }
+            elevenLabsAudio = getMainAudioElement();
 
             elevenLabsAudio.src = audioUrl;
             elevenLabsAudio.onended = () => {
@@ -370,11 +405,11 @@ const TTSProvider = (function() {
 
             const audioBlob = await response.blob();
             audioUrl = URL.createObjectURL(audioBlob);
+            // Revoke any stale URL that accumulated while the fetch was in-flight
+            revokeCurrentAudioUrl();
             currentAudioUrl = audioUrl;
 
-            if (!elevenLabsAudio) {
-                elevenLabsAudio = new Audio();
-            }
+            elevenLabsAudio = getMainAudioElement();
 
             elevenLabsAudio.src = audioUrl;
             elevenLabsAudio.onended = () => {
@@ -426,7 +461,8 @@ const TTSProvider = (function() {
 
         let audio;
         try {
-            audio = new Audio(audioUrl);
+            audio = getStreamingAudioElement();
+            audio.src = audioUrl;
         } catch (audioError) {
             revokeUrl();
             throw audioError;
@@ -604,8 +640,7 @@ const TTSProvider = (function() {
         // Note: activeStreamingAudioUrl is already null, so stopAllAudio won't double-revoke
         stopAllAudio();
 
-        // Also null out our references (stopAllAudio pauses but doesn't null these)
-        elevenLabsAudio = null;
+        // Keep the reusable audio elements alive so Safari retains the media-element unlock.
         activeStreamingAudio = null;
     };
 
@@ -635,6 +670,7 @@ const TTSProvider = (function() {
         speakWithLocalTTSStreaming,
         stop,
         resetStoppedFlag,
+        primeAudioElements,
         getProvider,
         shouldUseSpeech,
         shouldUseOpenAIAudio

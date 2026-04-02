@@ -10,6 +10,7 @@ const AudioMonitor = (function() {
     let silenceStartTime = 0;
     let lastStream = null;          // Store stream for recovery
     let isOpenAIAudio = false;      // Track if we should control speaking state
+    let usingSharedContext = false;
 
     const setup = (stream) => {
         // Store stream for potential recovery
@@ -23,7 +24,10 @@ const AudioMonitor = (function() {
             // Clean up any existing context first
             cleanup();
 
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            usingSharedContext = typeof AudioUnlock !== 'undefined' && AudioUnlock.getAudioContext;
+            audioContext = usingSharedContext
+                ? AudioUnlock.getAudioContext()
+                : new (window.AudioContext || window.webkitAudioContext)();
             // iOS may create contexts in suspended state; resume immediately
             // (will succeed because user has already interacted via Connect button)
             if (audioContext.state === 'suspended') {
@@ -68,11 +72,12 @@ const AudioMonitor = (function() {
             try { source.disconnect(); } catch (e) { UI.log("[audio] source disconnect error: " + e.message); }
             source = null;
         }
-        if (audioContext && audioContext.state !== "closed") {
+        if (audioContext && audioContext.state !== "closed" && !usingSharedContext) {
             try { audioContext.close(); } catch (e) { UI.log("[audio] context close error: " + e.message); }
         }
         audioContext = null;
         analyser = null;
+        usingSharedContext = false;
     };
 
     const start = () => {

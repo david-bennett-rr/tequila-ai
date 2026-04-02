@@ -69,6 +69,7 @@ const AppState = (function() {
     const forceState = (newState, reason) => {
         previousState = currentState;
         currentState = newState;
+        console.warn("[state] FORCED: " + previousState + " -> " + currentState + " (" + (reason || "no reason") + ") — investigate if this happens frequently");
         UI.log("[state] FORCED: " + previousState + " -> " + currentState + (reason ? " (" + reason + ")" : ""));
         Events.emit(Events.EVENTS.STATE_CHANGED, {
             from: previousState,

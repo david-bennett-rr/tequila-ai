@@ -109,7 +109,10 @@ const UI = (function() {
   };
 
   const updateRateLimit = (limit) => {
-    // Rate limit display removed from UI
+    // Rate limit display removed from UI; handler kept for backwards-compat with webrtc.js caller
+    if (limit && limit.remaining !== undefined && limit.remaining < 100) {
+      log("[rate-limit] " + limit.name + ": " + limit.remaining + " remaining (resets " + (limit.reset_seconds || "?") + "s)");
+    }
   };
 
   const setTranscript = (text, state) => {
