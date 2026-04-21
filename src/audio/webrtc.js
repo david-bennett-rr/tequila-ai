@@ -366,9 +366,46 @@ const WebRTC = (function() {
     // Reconnect state
     let reconnectAttempts = 0;
     let reconnectTimer = null;
+    let sessionRolloverTimer = null;
+    let sessionExpiresAtSeconds = null;
+
+    const clearSessionRollover = () => {
+        sessionRolloverTimer = Utils.clearTimer(sessionRolloverTimer);
+    };
 
     const getReconnectDelay = () => {
         return Utils.backoffDelay(reconnectAttempts, Config.BASE_RECONNECT_DELAY, Config.MAX_RECONNECT_DELAY);
+    };
+
+    const scheduleSessionRollover = (expiresAtSeconds = null) => {
+        clearSessionRollover();
+
+        if (!AppState.getFlag('shouldBeConnected')) return;
+
+        let delay = Config.REALTIME_SESSION_MAX_DURATION - Config.REALTIME_SESSION_RECONNECT_BUFFER;
+
+        if (typeof expiresAtSeconds === "number" && Number.isFinite(expiresAtSeconds) && expiresAtSeconds > 0) {
+            sessionExpiresAtSeconds = expiresAtSeconds;
+        }
+
+        if (typeof sessionExpiresAtSeconds === "number" && Number.isFinite(sessionExpiresAtSeconds) && sessionExpiresAtSeconds > 0) {
+            const expiresAtMs = sessionExpiresAtSeconds * 1000;
+            delay = Math.max(1000, expiresAtMs - Date.now() - Config.REALTIME_SESSION_RECONNECT_BUFFER);
+            UI.log("[session] expires at " + new Date(expiresAtMs).toLocaleTimeString() + ", rotating in " + Math.round(delay / 1000) + "s");
+        } else {
+            UI.log("[session] using fallback rotation in " + Math.round(delay / 1000) + "s");
+        }
+
+        sessionRolloverTimer = setTimeout(() => {
+            sessionRolloverTimer = null;
+
+            if (!AppState.getFlag('shouldBeConnected')) return;
+
+            UI.log("[session] rotating Realtime connection before hard expiry");
+            Events.emit(Events.EVENTS.CONNECTION_LOST, { reason: 'session-rollover' });
+            cleanupConnection();
+            scheduleReconnect();
+        }, delay);
     };
 
     const scheduleReconnect = () => {
@@ -436,6 +473,36 @@ const WebRTC = (function() {
 
         const t = msg.type;
 
+        if (t === "session.created" || t === "session.updated") {
+            const expiresAt = msg.session?.expires_at ?? msg.expires_at ?? null;
+            if (typeof expiresAt === "number" && expiresAt > 0) {
+                scheduleSessionRollover(expiresAt);
+                UI.log("[session] " + t + " (expires_at: " + expiresAt + ")");
+            } else {
+                UI.log("[session] " + t);
+            }
+            return;
+        }
+
+        if (t === "error" && msg.error) {
+            const errType = msg.error.type || "error";
+            const errCode = msg.error.code || "";
+            const errMessage = msg.error.message || "unknown realtime server error";
+            const detail = [errType, errCode, errMessage].filter(Boolean).join(" | ");
+
+            UI.log("[server] " + detail);
+            Events.emit(Events.EVENTS.ERROR, { source: 'realtime', error: detail, code: errCode, type: errType });
+
+            const expiryHint = (errCode + " " + errMessage).toLowerCase();
+            if (AppState.getFlag('shouldBeConnected') &&
+                /(expired|expiration|max(?:imum)? duration|session has ended|session ended|session closed|token expired)/.test(expiryHint)) {
+                UI.log("[server] session expiry detected, reconnecting");
+                cleanupConnection();
+                scheduleReconnect();
+            }
+            return;
+        }
+
         // Handle server VAD events (direct audio mode)
         if (t === "input_audio_buffer.speech_started") {
             UI.log("[vad] speech started");
@@ -468,7 +535,8 @@ const WebRTC = (function() {
         }
 
         // Handle streaming text deltas for low-latency TTS
-        if (t === "response.text.delta" || t === "response.audio_transcript.delta") {
+        if (t === "response.text.delta" || t === "response.audio_transcript.delta" ||
+            t === "response.output_text.delta" || t === "response.output_audio_transcript.delta") {
             const id = getResponseId(msg);
             const delta = msg.delta || "";
 
@@ -569,6 +637,8 @@ const WebRTC = (function() {
 
             // Clean up streaming state to prevent orphaned timeouts
             resetStreamingState();
+            clearSessionRollover();
+            sessionExpiresAtSeconds = null;
 
             // Clear text buffers from responses that never completed
             clearTextBuf();
@@ -916,6 +986,11 @@ const WebRTC = (function() {
 
         AppState.transition(AppState.STATES.CONNECTED, 'WebRTC connected');
         Events.emit(Events.EVENTS.CONNECTION_ESTABLISHED, { provider: 'openai' });
+
+        // Realtime sessions are capped in duration, so treat rotation as normal maintenance.
+        // If the server later provides a precise expires_at in session.created/session.updated,
+        // that will replace this fallback timer.
+        scheduleSessionRollover();
 
         // Start connection monitoring using Watchdog
         Watchdog.startConnectionMonitor(scheduleReconnect);

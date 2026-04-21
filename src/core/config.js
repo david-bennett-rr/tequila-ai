@@ -22,6 +22,8 @@ const Config = (function() {
         MAX_SPEAKING_DURATION: 60000,     // max TTS duration before force-stop (ms)
         MAX_AUDIO_SPEAKING_DURATION: 120000, // max audio monitor speaking duration (ms)
         AUDIO_SILENCE_THRESHOLD: 500,     // ms of audio silence before end-of-speech
+        REALTIME_SESSION_MAX_DURATION: 60 * 60 * 1000, // OpenAI Realtime sessions currently max out at 60 minutes
+        REALTIME_SESSION_RECONNECT_BUFFER: 60 * 1000,  // rotate the session 1 minute early to avoid hard expiry
 
         // Audio analysis
         AUDIO_LEVEL_THRESHOLD: 20,        // minimum average level to detect audio (higher = less sensitive)
@@ -29,8 +31,8 @@ const Config = (function() {
         // Chrome TTS workaround
         CHROME_RESUME_INTERVAL: 10000,    // pause/resume interval for Chrome bug (ms)
 
-        // Kiosk recovery - last resort page reload
-        MAX_RECONNECT_ATTEMPTS: 20,       // max WebRTC reconnect attempts before page reload
+        // Kiosk recovery
+        MAX_RECONNECT_ATTEMPTS: Number.POSITIVE_INFINITY, // keep retrying while the app should stay connected
         MAX_SPEECH_RETRY_ATTEMPTS: 10,    // max speech recognition retries before page reload
         PAGE_RELOAD_DELAY: 5000,          // delay before page reload (ms)
     };
