@@ -26,8 +26,8 @@ ollama serve
 
 ### 2. Start Piper TTS
 ```cmd
-cd tequila-ai\piper
-node ..\tts-server.js --engine piper --model en_US-john-medium.onnx
+cd tequila-ai
+node src\tts\tts-server.js --engine piper --model piper\en_US-john-medium.onnx
 ```
 
 ### 3. Serve the App
@@ -36,7 +36,7 @@ cd tequila-ai
 python -m http.server 8080
 ```
 
-Open: `http://localhost:8080/tequila-ai.html`
+Open: `http://localhost:8080/` or `http://localhost:8080/index.html`
 
 ### 4. Configure
 In Settings:
@@ -62,9 +62,9 @@ OLLAMA_ORIGINS="*" ollama serve
 3. Extract both to `tequila-ai/piper/` folder
 4. Start:
 ```bash
-cd tequila-ai/piper
-chmod +x ./piper
-node ../tts-server.js --engine piper --model <your-model>.onnx
+cd tequila-ai
+chmod +x ./piper/piper
+node ./src/tts/tts-server.js --engine piper --model ./piper/<your-model>.onnx
 ```
 
 ### 3. Serve the App
@@ -73,7 +73,7 @@ cd tequila-ai
 python3 -m http.server 8080
 ```
 
-Open: `http://localhost:8080/tequila-ai.html`
+Open: `http://localhost:8080/` or `http://localhost:8080/index.html`
 
 ### 4. Configure
 In Settings:
@@ -92,7 +92,7 @@ For cloud operation, select OpenAI or ElevenLabs in settings and enter API keys.
 ## Troubleshooting
 
 - **"Failed to fetch"**: Check Ollama/TTS server are running, CORS enabled
-- **No audio**: Verify tts-server.js is running, check browser console
+- **No audio**: Verify `node src/tts/tts-server.js ...` is running, then check the browser console
 - **Slow responses**: Try a smaller Ollama model
 - **Ollama port already in use** (Windows): Another Ollama process is holding the port. Find and kill it:
   ```cmd

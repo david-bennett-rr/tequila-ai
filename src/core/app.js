@@ -327,13 +327,10 @@ const App = (function() {
             UI.toast("ready");
         }
 
-        // Initialize noise monitor for adaptive speech detection
+        // Defer microphone-backed noise monitoring until the user explicitly starts listening
+        // or direct audio mode provisions a shared stream.
         if (typeof NoiseMonitor !== 'undefined') {
-            NoiseMonitor.setup().then(() => {
-                UI.log("[app] noise monitor ready");
-            }).catch(e => {
-                UI.log("[app] noise monitor unavailable: " + e.message);
-            });
+            UI.log("[app] noise monitor deferred until user audio starts");
         }
 
         UI.log("[app] initialized with new module architecture");

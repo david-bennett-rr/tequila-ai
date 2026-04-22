@@ -391,6 +391,7 @@ const Speech = (function() {
             if (isListening) {
                 // Stop listening - mute the mic
                 AppState.setFlag('shouldBeListening', false);
+                pendingUnmuteTimer = Utils.clearTimer(pendingUnmuteTimer);
                 WebRTC.setMicMuted(true);
                 updateButtonToStart();
                 UI.setTranscript("Microphone muted", "waiting");
@@ -423,6 +424,7 @@ const Speech = (function() {
             }
             silenceTimer = Utils.clearTimer(silenceTimer);
             pendingRetryTimer = Utils.clearTimer(pendingRetryTimer);
+            pendingUnmuteTimer = Utils.clearTimer(pendingUnmuteTimer);
             finalTranscript = "";
             retryCount = 0;
         } else {
@@ -431,6 +433,17 @@ const Speech = (function() {
             finalTranscript = "";
             recognitionBlocked = false;
             retryCount = 0;
+
+            // Start adaptive noise monitoring only after an explicit user listen action.
+            if (typeof NoiseMonitor !== 'undefined' &&
+                NoiseMonitor.setup &&
+                !NoiseMonitor.initialized) {
+                NoiseMonitor.setup().then(() => {
+                    UI.log("[speech] noise monitor ready");
+                }).catch(e => {
+                    UI.log("[speech] noise monitor unavailable: " + e.message);
+                });
+            }
 
             // Start watchdogs
             Watchdog.startSpeechWatchdog(tryStartRecognition);
@@ -513,7 +526,7 @@ const Speech = (function() {
             if (!Storage.listenWhileSpeaking) {
                 pendingUnmuteTimer = setTimeout(() => {
                     pendingUnmuteTimer = null;
-                    if (!AppState.getFlag('assistantSpeaking')) {
+                    if (!AppState.getFlag('assistantSpeaking') && AppState.getFlag('shouldBeListening')) {
                         Utils.safeCall(WebRTC, 'setMicMuted', false);
                     }
                 }, 800);

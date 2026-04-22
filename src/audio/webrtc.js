@@ -21,6 +21,95 @@ const WebRTC = (function() {
     let streamingResponseComplete = false;  // True when response.done received, waiting for queue to drain
     let processingQueueLock = false;    // Mutex to prevent concurrent processStreamingQueue execution
 
+    const normalizeTextEntry = (entry = {}) => ({
+        textDelta: entry.textDelta || "",
+        transcriptDelta: entry.transcriptDelta || "",
+        textDone: entry.textDone || "",
+        transcriptDone: entry.transcriptDone || "",
+        partText: entry.partText || entry.text || "",
+        partTranscript: entry.partTranscript || "",
+        ts: entry.ts || Date.now()
+    });
+
+    const mergeTextEntries = (primaryEntry, secondaryEntry) => {
+        const primary = normalizeTextEntry(primaryEntry);
+        const secondary = normalizeTextEntry(secondaryEntry);
+        return {
+            textDelta: secondary.textDelta + primary.textDelta,
+            transcriptDelta: secondary.transcriptDelta + primary.transcriptDelta,
+            textDone: [secondary.textDone, primary.textDone].filter(Boolean).join(" ").trim(),
+            transcriptDone: [secondary.transcriptDone, primary.transcriptDone].filter(Boolean).join(" ").trim(),
+            partText: [secondary.partText, primary.partText].filter(Boolean).join(" ").trim(),
+            partTranscript: [secondary.partTranscript, primary.partTranscript].filter(Boolean).join(" ").trim(),
+            ts: Math.max(primary.ts || 0, secondary.ts || 0, Date.now())
+        };
+    };
+
+    const getTextEntry = (responseId) => {
+        if (!responseId) return null;
+        textBuf[responseId] = normalizeTextEntry(textBuf[responseId]);
+        textBuf[responseId].ts = Date.now();
+        return textBuf[responseId];
+    };
+
+    const appendEntryText = (responseId, field, text, separator = "") => {
+        const value = typeof text === "string" ? text : "";
+        if (!value) return;
+        const entry = getTextEntry(responseId);
+        if (!entry) return;
+        if (separator && entry[field]) {
+            entry[field] += separator + value;
+        } else {
+            entry[field] += value;
+        }
+        entry.ts = Date.now();
+    };
+
+    const extractOutputCandidates = (response) => {
+        const textSegments = [];
+        const transcriptSegments = [];
+        const outputItems = Array.isArray(response?.output) ? response.output : [];
+
+        outputItems.forEach(item => {
+            const contentParts = Array.isArray(item?.content) ? item.content : [item];
+            contentParts.forEach(part => {
+                if (!part || typeof part !== "object") return;
+
+                const text = typeof part.text === "string" ? part.text.trim() : "";
+                const transcript = typeof part.transcript === "string" ? part.transcript.trim() : "";
+                const type = part.type || "";
+
+                if (text && (type === "output_text" || type === "text" || !transcript)) {
+                    textSegments.push(text);
+                }
+                if (transcript && (!text || type === "output_audio" || type === "audio")) {
+                    transcriptSegments.push(transcript);
+                }
+            });
+        });
+
+        return {
+            text: textSegments.join("\n").trim(),
+            transcript: transcriptSegments.join("\n").trim()
+        };
+    };
+
+    const resolveAssistantText = (responseId, response) => {
+        const entry = responseId ? normalizeTextEntry(textBuf[responseId]) : null;
+        const output = extractOutputCandidates(response);
+        return (
+            output.text ||
+            entry?.textDone ||
+            entry?.partText ||
+            entry?.textDelta ||
+            output.transcript ||
+            entry?.transcriptDone ||
+            entry?.partTranscript ||
+            entry?.transcriptDelta ||
+            ""
+        ).trim();
+    };
+
     // Get or create a consistent ID for a response
     // This ensures content_part.done and response.done use the same ID
     // Note: All message handling runs on the same JS thread, so no true race condition,
@@ -37,10 +126,10 @@ const WebRTC = (function() {
             if (currentFallbackId && textBuf[currentFallbackId]) {
                 if (textBuf[actualId]) {
                     // Both exist — merge fallback text into the real entry
-                    textBuf[actualId].text = textBuf[currentFallbackId].text + textBuf[actualId].text;
+                    textBuf[actualId] = mergeTextEntries(textBuf[actualId], textBuf[currentFallbackId]);
                     UI.log("[id] merged fallback " + currentFallbackId + " into " + actualId);
                 } else {
-                    textBuf[actualId] = textBuf[currentFallbackId];
+                    textBuf[actualId] = normalizeTextEntry(textBuf[currentFallbackId]);
                     UI.log("[id] migrated fallback " + currentFallbackId + " -> " + actualId);
                 }
                 delete textBuf[currentFallbackId];
@@ -377,6 +466,10 @@ const WebRTC = (function() {
         return Utils.backoffDelay(reconnectAttempts, Config.BASE_RECONNECT_DELAY, Config.MAX_RECONNECT_DELAY);
     };
 
+    const clearReconnectTimer = () => {
+        reconnectTimer = Utils.clearTimer(reconnectTimer);
+    };
+
     const scheduleSessionRollover = (expiresAtSeconds = null) => {
         clearSessionRollover();
 
@@ -411,10 +504,8 @@ const WebRTC = (function() {
     const scheduleReconnect = () => {
         if (!AppState.getFlag('shouldBeConnected')) return;
 
-        // Clear any existing timer to prevent accumulation
         if (reconnectTimer) {
-            clearTimeout(reconnectTimer);
-            reconnectTimer = null;
+            return;
         }
 
         // Check if we've exceeded max reconnect attempts - trigger page reload as last resort
@@ -438,7 +529,7 @@ const WebRTC = (function() {
         Events.emit(Events.EVENTS.RECONNECT_SCHEDULED, { attempt: reconnectAttempts, delay: delay });
 
         reconnectTimer = setTimeout(async () => {
-            reconnectTimer = null;
+            clearReconnectTimer();
             if (AppState.getFlag('shouldBeConnected') && !isConnected()) {
                 UI.log("[sys] attempting reconnect...");
                 try {
@@ -540,6 +631,12 @@ const WebRTC = (function() {
             const id = getResponseId(msg);
             const delta = msg.delta || "";
 
+            if (t.includes("audio_transcript")) {
+                appendEntryText(id, "transcriptDelta", delta);
+            } else {
+                appendEntryText(id, "textDelta", delta);
+            }
+
             // Mark that response has started (for transcript ordering)
             // Don't flush pending transcript here - wait until response.done
             // so we can log assistant first, then user (prepend reverses order)
@@ -553,15 +650,26 @@ const WebRTC = (function() {
             return;
         }
 
+        if (t === "response.text.done" || t === "response.output_text.done") {
+            const id = getResponseId(msg);
+            appendEntryText(id, "textDone", msg.text || "", " ");
+            purgeTextBuf();
+            return;
+        }
+
+        if (t === "response.audio_transcript.done" || t === "response.output_audio_transcript.done") {
+            const id = getResponseId(msg);
+            appendEntryText(id, "transcriptDone", msg.transcript || "", " ");
+            purgeTextBuf();
+            return;
+        }
+
         if (t === "response.content_part.done") {
             const id = getResponseId(msg);
-            if (!textBuf[id]) {
-                textBuf[id] = { text: "", ts: Date.now() };
-            }
             if (msg.part?.type === "text") {
-                textBuf[id].text += (msg.part.text || "");
+                appendEntryText(id, "partText", msg.part.text || "", " ");
             } else if (msg.part?.type === "audio" && msg.part?.transcript) {
-                textBuf[id].text += (msg.part.transcript || "");
+                appendEntryText(id, "partTranscript", msg.part.transcript || "", " ");
             }
             // Purge stale entries from responses that never got response.done
             purgeTextBuf();
@@ -576,8 +684,7 @@ const WebRTC = (function() {
 
         if (t === "response.done" && msg.response) {
             const id = getResponseId(msg);
-            const entry = textBuf[id];
-            const assistantText = (entry ? entry.text : "").trim();
+            const assistantText = resolveAssistantText(id, msg.response);
             delete textBuf[id];
             clearCurrentFallback();  // Reset fallback for next response
 
@@ -630,8 +737,23 @@ const WebRTC = (function() {
         cleanupInProgress = true;
 
         try {
-            try { dataChannel?.close(); } catch (e) { UI.log("[cleanup] dataChannel close error: " + e.message); }
-            try { pc?.close(); } catch (e) { UI.log("[cleanup] pc close error: " + e.message); }
+            const channel = dataChannel;
+            const peer = pc;
+
+            if (channel) {
+                channel.onopen = null;
+                channel.onclose = null;
+                channel.onerror = null;
+                channel.onmessage = null;
+            }
+            if (peer) {
+                peer.onconnectionstatechange = null;
+                peer.oniceconnectionstatechange = null;
+                peer.ontrack = null;
+            }
+
+            try { channel?.close(); } catch (e) { UI.log("[cleanup] dataChannel close error: " + e.message); }
+            try { peer?.close(); } catch (e) { UI.log("[cleanup] pc close error: " + e.message); }
             // NOTE: localStream is intentionally kept alive for reconnect (avoids re-prompting mic permissions)
             // It is only destroyed in hangup() for intentional disconnect
 
@@ -701,6 +823,14 @@ const WebRTC = (function() {
             try { unsubUserInterrupted(); } catch (e) { UI.log("[cleanup] unsubUserInterrupted error: " + e.message); }
             unsubUserInterrupted = null;
         }
+
+        // Always start reconnect attempts from a clean peer/data-channel state.
+        if (pc || dataChannel) {
+            cleanupConnection();
+        }
+
+        // A manual or in-flight reconnect attempt supersedes any previously scheduled timer.
+        clearReconnectTimer();
 
         // Mark that we want to stay connected (for kiosk auto-reconnect)
         AppState.setFlag('shouldBeConnected', true);
@@ -855,6 +985,7 @@ const WebRTC = (function() {
             if (AppState.getFlag('shouldBeConnected')) {
                 UI.log("[dc] unexpected close, scheduling reconnect");
                 Events.emit(Events.EVENTS.CONNECTION_LOST, { reason: 'datachannel-close' });
+                cleanupConnection();
                 scheduleReconnect();
             }
         };
@@ -864,6 +995,7 @@ const WebRTC = (function() {
             Events.emit(Events.EVENTS.ERROR, { source: 'datachannel', error: errDetail });
             // Trigger reconnect on error
             if (AppState.getFlag('shouldBeConnected')) {
+                cleanupConnection();
                 scheduleReconnect();
             }
         };
@@ -1207,20 +1339,16 @@ const WebRTC = (function() {
             return;
         }
 
-        // OpenAI uses its own prompt (always instruct-capable)
-        // Use null checks for Prompts and Summary modules
-        const openaiSummary = typeof Summary !== 'undefined' ? Summary.summary : '';
-        const openaiPrompt = typeof Prompts !== 'undefined'
-            ? Prompts.buildInstructPrompt(text, openaiSummary, '')
-            : text;  // Fallback to just the text if Prompts unavailable
-
         const messages = [
             {
                 type: "conversation.item.create",
                 item: {
                     type: "message",
                     role: "user",
-                    content: [{ type: "input_text", text: openaiPrompt }]
+                    // Session-level instructions already provide persona and background knowledge.
+                    // Keep per-turn input as the user's literal message so we don't duplicate the
+                    // full summary on every request or blur the conversation roles.
+                    content: [{ type: "input_text", text }]
                 }
             },
             {
@@ -1245,10 +1373,7 @@ const WebRTC = (function() {
         currentResponseStarted = false;
 
         // Clear any pending reconnect
-        if (reconnectTimer) {
-            clearTimeout(reconnectTimer);
-            reconnectTimer = null;
-        }
+        clearReconnectTimer();
 
         // Stop connection monitor watchdog
         Watchdog.stop(Watchdog.NAMES.CONNECTION_MONITOR);
