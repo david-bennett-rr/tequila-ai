@@ -381,7 +381,11 @@ const Speech = (function() {
 
     const toggle = () => {
         // In direct audio mode, toggle mic muting instead of browser speech recognition
-        if (Storage.useDirectAudio && typeof WebRTC !== 'undefined') {
+        const directAudioActive = typeof WebRTC !== 'undefined' &&
+            WebRTC.isDirectAudioActive &&
+            WebRTC.isDirectAudioActive();
+
+        if (directAudioActive) {
             // Must be connected to toggle mic in direct audio mode
             if (!AppState.isConnected()) {
                 UI.log("[speech] direct audio: cannot toggle - not connected");

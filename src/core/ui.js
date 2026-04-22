@@ -46,15 +46,17 @@ const UI = (function() {
   };
 
   const setControls = (state) => {
-    const connected = state === "connected";
+    const normalizedState = state === false ? "connecting" : state;
+    const connected = normalizedState === "connected";
+    const connecting = normalizedState === "connecting" || normalizedState === "reconnecting";
     const connect = $("connect");
     const hangup = $("hangup");
     const send = $("send");
     const text = $("text");
     const listen = $("listen");
 
-    if (connect) connect.disabled = connected;
-    if (hangup) hangup.disabled = !connected;
+    if (connect) connect.disabled = connected || connecting;
+    if (hangup) hangup.disabled = normalizedState === "idle";
     if (send) send.disabled = !connected;
     if (text) text.disabled = !connected;
     if (listen) listen.disabled = !connected;
@@ -127,12 +129,29 @@ const UI = (function() {
   const updateProviderFields = () => {
     const llmProvider = $("llmProvider");
     const ttsProvider = $("ttsProvider");
+    const useDirectAudio = $("useDirectAudio");
+    const directAudioHelp = $("directAudioHelp");
 
     if (llmProvider) {
       const llmOpenAI = $("llm-openai-fields");
       const llmLocal = $("llm-local-fields");
       if (llmOpenAI) llmOpenAI.style.display = llmProvider.value === "openai" ? "flex" : "none";
       if (llmLocal) llmLocal.style.display = llmProvider.value === "local" ? "flex" : "none";
+
+      const directAudioAvailable = llmProvider.value === "openai";
+      if (useDirectAudio) {
+        useDirectAudio.disabled = !directAudioAvailable;
+        const directAudioToggle = useDirectAudio.closest(".toggle");
+        if (directAudioToggle) {
+          directAudioToggle.style.opacity = directAudioAvailable ? "1" : "0.6";
+          directAudioToggle.style.cursor = directAudioAvailable ? "pointer" : "not-allowed";
+        }
+      }
+      if (directAudioHelp) {
+        directAudioHelp.innerHTML = directAudioAvailable
+          ? 'Sends audio directly to OpenAI for faster response.<br/>Uses server-side VAD instead of browser speech recognition.<br/><strong>Requires reconnect after changing.</strong>'
+          : 'Direct audio is only available with OpenAI Realtime.<br/>Local LLM mode uses browser speech recognition instead.';
+      }
     }
 
     if (ttsProvider) {

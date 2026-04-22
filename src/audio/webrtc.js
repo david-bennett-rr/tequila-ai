@@ -21,6 +21,12 @@ const WebRTC = (function() {
     let streamingResponseComplete = false;  // True when response.done received, waiting for queue to drain
     let processingQueueLock = false;    // Mutex to prevent concurrent processStreamingQueue execution
 
+    const shouldUseStreamingTTS = () => {
+        return typeof TTSProvider !== 'undefined' &&
+            TTSProvider.supportsStreamingPlayback &&
+            TTSProvider.supportsStreamingPlayback();
+    };
+
     const normalizeTextEntry = (entry = {}) => ({
         textDelta: entry.textDelta || "",
         transcriptDelta: entry.transcriptDelta || "",
@@ -416,7 +422,7 @@ const WebRTC = (function() {
         streamingBuffer = remaining;
 
         // Queue sentences for TTS (cap size to prevent unbounded growth)
-        if (sentences.length > 0 && TTSProvider.shouldUseSpeech()) {
+        if (sentences.length > 0 && shouldUseStreamingTTS()) {
             // Trim queue BEFORE pushing so total never exceeds MAX_STREAMING_QUEUE
             const available = MAX_STREAMING_QUEUE - streamingQueue.length;
             if (sentences.length > available) {
@@ -432,8 +438,12 @@ const WebRTC = (function() {
     };
 
     // Flush any remaining text at end of response
-    const flushStreamingBuffer = () => {
-        if (streamingBuffer.trim() && TTSProvider.shouldUseSpeech()) {
+    const flushStreamingBuffer = (usedStreamingTTS) => {
+        if (!usedStreamingTTS) {
+            return;
+        }
+
+        if (streamingBuffer.trim()) {
             streamingQueue.push(streamingBuffer.trim());
         }
         streamingBuffer = "";
@@ -524,6 +534,7 @@ const WebRTC = (function() {
         reconnectAttempts++;
         UI.log("[sys] scheduling reconnect in " + delay + "ms (attempt " + reconnectAttempts + "/" + Config.MAX_RECONNECT_ATTEMPTS + ")");
         UI.toast("reconnecting...");
+        UI.setControls("reconnecting");
 
         AppState.transition(AppState.STATES.RECONNECTING, 'scheduling reconnect');
         Events.emit(Events.EVENTS.RECONNECT_SCHEDULED, { attempt: reconnectAttempts, delay: delay });
@@ -644,7 +655,7 @@ const WebRTC = (function() {
                 currentResponseStarted = true;
             }
 
-            if (delta && TTSProvider.shouldUseSpeech()) {
+            if (delta && shouldUseStreamingTTS()) {
                 handleTextDelta(delta, id);
             }
             return;
@@ -684,6 +695,7 @@ const WebRTC = (function() {
 
         if (t === "response.done" && msg.response) {
             const id = getResponseId(msg);
+            const usedStreamingTTS = streamingResponseId === id;
             const assistantText = resolveAssistantText(id, msg.response);
             delete textBuf[id];
             clearCurrentFallback();  // Reset fallback for next response
@@ -709,16 +721,18 @@ const WebRTC = (function() {
             Events.emit(Events.EVENTS.ASSISTANT_RESPONSE, { text: assistantText, inTok, outTok });
 
             // Flush any remaining streamed text
-            flushStreamingBuffer();
+            flushStreamingBuffer(usedStreamingTTS);
 
             // Only use non-streaming TTS if streaming didn't handle it
             // (streaming handles TTS sentence-by-sentence as they arrive)
-            if (!streamingResponseId && TTSProvider.shouldUseSpeech()) {
+            if (!usedStreamingTTS && TTSProvider.shouldUseSpeech() && !TTSProvider.shouldUseOpenAIAudio()) {
                 // Reset stopped flag so new speech can play
                 TTSProvider.resetStoppedFlag();
                 const provider = TTSProvider.getProvider();
                 if (provider === "elevenlabs" && assistantText) {
                     TTSProvider.speakWithElevenLabs(assistantText);
+                } else if (provider === "browser" && assistantText) {
+                    TTSProvider.speakWithBrowser(assistantText);
                 } else if (provider === "local" && assistantText) {
                     TTSProvider.speakWithLocalTTS(assistantText);
                 }
@@ -850,8 +864,8 @@ const WebRTC = (function() {
         }
 
         if (llmProvider === "local") {
-            UI.setControls(false);
-            UI.toast("connecting to local LLM…");
+            UI.setControls("connecting");
+            UI.toast("connecting to local LLM...");
             // Simulate connection for local LLM (no WebRTC)
             localLlmConnected = true;
             reconnectAttempts = 0;
@@ -877,8 +891,8 @@ const WebRTC = (function() {
             return;
         }
 
-        UI.setControls(false);
-        UI.toast("connecting…");
+        UI.setControls("connecting");
+        UI.toast("connecting...");
 
         pc = new RTCPeerConnection({
             iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }]
@@ -1412,6 +1426,7 @@ const WebRTC = (function() {
         sendText,
         hangup,
         isConnected,
-        setMicMuted
+        setMicMuted,
+        isDirectAudioActive: () => !!localStream
     };
 })();

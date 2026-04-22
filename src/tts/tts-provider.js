@@ -662,6 +662,15 @@ const TTSProvider = (function() {
         return shouldUseSpeech() && getProvider() === "openai";
     };
 
+    const supportsStreamingPlayback = () => {
+        if (!shouldUseSpeech() || shouldUseOpenAIAudio()) {
+            return false;
+        }
+
+        const provider = getProvider();
+        return provider === "elevenlabs" || provider === "local";
+    };
+
     return {
         speakWithBrowser,
         speakWithElevenLabs,
@@ -673,6 +682,7 @@ const TTSProvider = (function() {
         primeAudioElements,
         getProvider,
         shouldUseSpeech,
-        shouldUseOpenAIAudio
+        shouldUseOpenAIAudio,
+        supportsStreamingPlayback
     };
 })();
